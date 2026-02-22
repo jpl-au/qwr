@@ -46,6 +46,21 @@
 //	}
 //	defer rows.Close()
 //
+// # Observing Events
+//
+// qwr emits structured events for all significant operations. Subscribe to
+// receive events for logging, metrics, tracing, or alerting:
+//
+//	manager.Subscribe(func(e qwr.Event) {
+//		fmt.Printf("event: %d at %v\n", e.Type, e.Timestamp)
+//	})
+//
+// Use filters to receive only specific event types:
+//
+//	manager.SubscribeFiltered(func(e qwr.Event) {
+//		fmt.Printf("error: %v\n", e.Err)
+//	}, qwr.ErrorEvents())
+//
 // # Profiles
 //
 // Database profiles configure connection pools and SQLite PRAGMA settings.

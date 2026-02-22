@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"database/sql"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -19,17 +18,17 @@ type ErrorQueue struct {
 	errorList *list.List
 	db        *sql.DB
 
-	metrics *Metrics
+	events  *EventBus
 	options Options // Store options by value since they're immutable
 	dbPath  string  // Database path for logging context
 }
 
 // NewErrorQueue creates a new error queue
-func NewErrorQueue(ws *WriteSerialiser, metrics *Metrics, opts Options, dbPath string) *ErrorQueue {
+func NewErrorQueue(events *EventBus, opts Options, dbPath string) *ErrorQueue {
 	eq := &ErrorQueue{
 		errors:    make(map[int64]*list.Element),
 		errorList: list.New(),
-		metrics:   metrics,
+		events:    events,
 		options:   opts, // Store by value
 		dbPath:    dbPath,
 	}
@@ -41,14 +40,6 @@ func NewErrorQueue(ws *WriteSerialiser, metrics *Metrics, opts Options, dbPath s
 	}
 
 	return eq
-}
-
-// dbName extracts the database filename for logging context
-func (eq *ErrorQueue) dbName() string {
-	if eq.dbPath == "" {
-		return ""
-	}
-	return filepath.Base(eq.dbPath)
 }
 
 // Close shuts down the error queue
@@ -63,11 +54,7 @@ func (eq *ErrorQueue) Store(jobErr JobError) {
 	// Non-retriable errors are immediately persisted to DB and not queued for retry
 	if jobErr.errType == nil || !jobErr.errType.IsRetriable() {
 		eq.PersistError(jobErr, "non_retriable")
-		s := "unknown"
-		if jobErr.errType != nil {
-			s = jobErr.errType.Strategy.String()
-		}
-		slog.Debug("Non-retriable error persisted to database", "jobID", jobErr.Query.ID(), "errorType", s, "db", eq.dbName())
+		eq.events.Emit(Event{Type: EventErrorPersisted, JobID: jobErr.Query.ID(), Err: jobErr.err})
 		return
 	}
 
@@ -83,17 +70,9 @@ func (eq *ErrorQueue) Store(jobErr JobError) {
 	elem := eq.errorList.PushBack(jobErr)
 	eq.errors[jobErr.Query.ID()] = elem
 
-	if eq.metrics != nil {
-		eq.metrics.recordErrorAdded()
-	}
+	eq.events.Emit(Event{Type: EventErrorStored, JobID: jobErr.Query.ID(), Err: jobErr.err})
 
 	eq.enforceMaxSize()
-
-	s := "unknown"
-	if jobErr.errType != nil {
-		s = jobErr.errType.Strategy.String()
-	}
-	slog.Debug("Added error to queue", "jobID", jobErr.Query.ID(), "errorType", s, "db", eq.dbName())
 }
 
 // Get retrieves a specific error by job ID
@@ -119,7 +98,7 @@ func (eq *ErrorQueue) Remove(jobID int64) bool {
 	if elem, exists := eq.errors[jobID]; exists {
 		eq.errorList.Remove(elem)
 		delete(eq.errors, jobID)
-		slog.Debug("Removed error from queue", "jobID", jobID, "db", eq.dbName())
+		eq.events.Emit(Event{Type: EventErrorRemoved, JobID: jobID})
 		return true
 	}
 	return false
@@ -152,7 +131,7 @@ func (eq *ErrorQueue) Clear() {
 	eq.mu.Lock()
 	defer eq.mu.Unlock()
 
-	slog.Info("Cleared error queue", "removedCount", eq.errorList.Len(), "db", eq.dbName())
+	eq.events.Emit(Event{Type: EventErrorQueueCleared})
 	eq.errors = make(map[int64]*list.Element)
 	eq.errorList = list.New()
 }
@@ -168,10 +147,7 @@ func (eq *ErrorQueue) enforceMaxSize() {
 		return
 	}
 
-	slog.Warn("Error queue overflow: removing oldest entries",
-		"removing", excess,
-		"maxSize", eq.options.ErrorQueueMaxSize,
-		"db", eq.dbName())
+	eq.events.Emit(Event{Type: EventErrorQueueOverflow, EvictedCount: excess})
 
 	for i := 0; i < excess && eq.errorList.Front() != nil; i++ {
 		oldest := eq.errorList.Front()
@@ -185,10 +161,6 @@ func (eq *ErrorQueue) enforceMaxSize() {
 		eq.PersistError(jobErr, "queue_overflow")
 		eq.errorList.Remove(oldest)
 		delete(eq.errors, jobErr.Query.ID())
-
-		if eq.metrics != nil {
-			eq.metrics.recordErrorDropped()
-		}
 	}
 }
 
@@ -229,7 +201,7 @@ func (eq *ErrorQueue) PersistError(jobErr JobError, reason string) error {
 
 	insertSQL := `
 		INSERT INTO error_log (
-			job_id, error_message, error_type, sql_statement, 
+			job_id, error_message, error_type, sql_statement,
 			args_cbor, attempts, first_error_at, last_error_at, reason
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
@@ -251,7 +223,9 @@ func (eq *ErrorQueue) PersistError(jobErr JobError, reason string) error {
 		reason)
 
 	if err != nil {
-		slog.Error("Failed to persist error to database", "jobID", jobErr.Query.ID(), "error", err, "db", eq.dbName())
+		eq.events.Emit(Event{Type: EventErrorPersistFailed, Err: err, JobID: jobErr.Query.ID()})
+	} else {
+		eq.events.Emit(Event{Type: EventErrorPersisted, JobID: jobErr.Query.ID()})
 	}
 
 	return err
@@ -263,14 +237,14 @@ func (eq *ErrorQueue) initErrorLogDb(errorLogPath string) {
 
 	eq.db, err = sql.Open("sqlite", errorLogPath)
 	if err != nil {
-		slog.Error("Failed to open error log database", "path", errorLogPath, "error", err, "db", eq.dbName())
+		slog.Error("Failed to open error log database", "path", errorLogPath, "error", err)
 		return
 	}
 
 	p := profile.WriteBalanced()
 
 	if err := p.Apply(eq.db); err != nil {
-		slog.Error("Failed to apply profile to error log database", "error", err, "db", eq.dbName())
+		slog.Error("Failed to apply profile to error log database", "error", err)
 		eq.db.Close()
 		return
 	}
@@ -291,10 +265,8 @@ func (eq *ErrorQueue) initErrorLogDb(errorLogPath string) {
 	`
 
 	if _, err := eq.db.Exec(createTableSQL); err != nil {
-		slog.Error("Failed to create error log table", "error", err, "db", eq.dbName())
+		slog.Error("Failed to create error log table", "error", err)
 		eq.db.Close()
 		return
 	}
-
-	slog.Debug("Error log database initialised", "path", errorLogPath, "db", eq.dbName())
 }

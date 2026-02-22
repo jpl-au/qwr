@@ -2,10 +2,10 @@ package qwr
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/jpl-au/qwr/checkpoint"
@@ -40,48 +40,55 @@ func TestContextCancellation(t *testing.T) {
 	}
 }
 
-// testHandler implements slog.Handler for testing.
-type testHandler struct {
-	logged bool
-}
+// TestEventsEmitted verifies events are emitted during manager lifecycle.
+func TestEventsEmitted(t *testing.T) {
+	var mu sync.Mutex
+	var received []EventType
 
-func (h *testHandler) Enabled(_ context.Context, _ slog.Level) bool {
-	return true
-}
-
-func (h *testHandler) Handle(_ context.Context, r slog.Record) error {
-	// Check if qwr's initialisation message was logged
-	// Message format: "qwr manager initialised successfully: <dbname>"
-	if r.Message == "qwr manager initialised successfully: file::memory:?cache=shared" {
-		h.logged = true
+	handler := func(e Event) {
+		mu.Lock()
+		received = append(received, e.Type)
+		mu.Unlock()
 	}
-	return nil
-}
 
-func (h *testHandler) WithAttrs(_ []slog.Attr) slog.Handler {
-	return h
-}
+	mgr, err := New("file::memory:?cache=shared", DefaultOptions).
+		WithObserver(handler).
+		Open()
+	if err != nil {
+		t.Fatalf("failed to create manager: %v", err)
+	}
 
-func (h *testHandler) WithGroup(_ string) slog.Handler {
-	return h
-}
+	// Close to trigger closing/closed events
+	if err := mgr.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
+	}
 
-// TestDefaultLogger verifies QWR uses slog.Default().
-func TestDefaultLogger(t *testing.T) {
-	// Create custom handler
-	handler := &testHandler{}
+	mu.Lock()
+	defer mu.Unlock()
 
-	// Set custom default logger
-	oldDefault := slog.Default()
-	defer slog.SetDefault(oldDefault)
-	slog.SetDefault(slog.New(handler))
+	// Should have at least: WorkerStarted, ManagerOpened, ManagerClosing, WorkerStopped, ManagerClosed
+	hasOpened := false
+	hasClosing := false
+	hasClosed := false
+	for _, et := range received {
+		switch et {
+		case EventManagerOpened:
+			hasOpened = true
+		case EventManagerClosing:
+			hasClosing = true
+		case EventManagerClosed:
+			hasClosed = true
+		}
+	}
 
-	// Create manager (should log via our handler)
-	mgr := newTestMgr(t, DefaultOptions)
-	defer mgr.Close()
-
-	if !handler.logged {
-		t.Error("expected QWR to use slog.Default(), but custom handler not called")
+	if !hasOpened {
+		t.Error("expected EventManagerOpened to be emitted")
+	}
+	if !hasClosing {
+		t.Error("expected EventManagerClosing to be emitted")
+	}
+	if !hasClosed {
+		t.Error("expected EventManagerClosed to be emitted")
 	}
 }
 

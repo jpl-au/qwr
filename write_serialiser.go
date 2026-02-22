@@ -14,13 +14,10 @@ type WriteSerialiser struct {
 	queue         chan workItem
 	workerRunning atomic.Bool
 	workerWg      sync.WaitGroup
-	metrics       *Metrics
+	events        *EventBus
 	writeCache    *StmtCache
 	mu            sync.RWMutex
 	shutdownOnce  sync.Once
-
-	// Callback for handling async errors
-	onAsyncError func(Query, error, time.Duration)
 
 	// Store timeout values directly
 	jobTimeout         time.Duration
@@ -36,11 +33,11 @@ type workItem struct {
 }
 
 // NewWorkerPool creates a new worker pool for database jobs
-func NewWorkerPool(db *sql.DB, queueDepth int, metrics *Metrics, writeCache *StmtCache, options Options) *WriteSerialiser {
+func NewWorkerPool(db *sql.DB, queueDepth int, events *EventBus, writeCache *StmtCache, options Options) *WriteSerialiser {
 	wp := &WriteSerialiser{
 		db:                 db,
 		queue:              make(chan workItem, queueDepth),
-		metrics:            metrics,
+		events:             events,
 		writeCache:         writeCache,
 		jobTimeout:         options.JobTimeout,
 		transactionTimeout: options.TransactionTimeout,
@@ -51,9 +48,9 @@ func NewWorkerPool(db *sql.DB, queueDepth int, metrics *Metrics, writeCache *Stm
 	return wp
 }
 
-// SetAsyncErrorHandler sets the callback for handling async errors
-func (wp *WriteSerialiser) SetAsyncErrorHandler(handler func(Query, error, time.Duration)) {
-	wp.onAsyncError = handler
+// QueueLen returns the current number of items in the work queue.
+func (wp *WriteSerialiser) QueueLen() int {
+	return len(wp.queue)
 }
 
 // Start begins the worker processing loop
@@ -61,6 +58,7 @@ func (wp *WriteSerialiser) Start(ctx context.Context) {
 	wp.workerWg.Go(func() {
 		wp.worker(ctx)
 	})
+	wp.events.Emit(Event{Type: EventWorkerStarted})
 }
 
 // Stop shuts down the worker pool
@@ -78,6 +76,8 @@ func (wp *WriteSerialiser) Stop() error {
 
 		// Wait for worker to finish processing all remaining items and exit
 		wp.workerWg.Wait()
+
+		wp.events.Emit(Event{Type: EventWorkerStopped})
 	})
 
 	return err
@@ -102,9 +102,7 @@ func (wp *WriteSerialiser) SubmitWait(ctx context.Context, job Job) (JobResult, 
 
 	select {
 	case wp.queue <- item:
-		if wp.metrics != nil {
-			wp.metrics.recordJobQueued()
-		}
+		wp.events.Emit(Event{Type: EventJobQueued, JobID: job.ID(), JobType: job.Type})
 	case <-ctx.Done():
 		// Do not close resultChan here as the worker might be about to write to it
 		return JobResult{}, ctx.Err()
@@ -136,9 +134,7 @@ func (wp *WriteSerialiser) SubmitNoWait(ctx context.Context, job Job) (int64, er
 
 	select {
 	case wp.queue <- item:
-		if wp.metrics != nil {
-			wp.metrics.recordJobQueued()
-		}
+		wp.events.Emit(Event{Type: EventJobQueued, JobID: job.ID(), JobType: job.Type})
 		return job.ID(), nil
 	case <-ctx.Done():
 		return job.ID(), ctx.Err()
@@ -165,9 +161,7 @@ func (wp *WriteSerialiser) SubmitWaitNoContext(job Job) (JobResult, error) {
 	// Submit to queue with timeout to prevent deadlock when queue is full
 	select {
 	case wp.queue <- item:
-		if wp.metrics != nil {
-			wp.metrics.recordJobQueued()
-		}
+		wp.events.Emit(Event{Type: EventJobQueued, JobID: job.ID(), JobType: job.Type})
 	case <-time.After(wp.queueSubmitTimeout):
 		// Do not close resultChan to avoid race
 		return JobResult{}, ErrQueueTimeout
@@ -196,9 +190,7 @@ func (wp *WriteSerialiser) SubmitNoWaitNoContext(job Job) (int64, error) {
 	// Submit to queue with timeout to prevent deadlock when queue is full
 	select {
 	case wp.queue <- item:
-		if wp.metrics != nil {
-			wp.metrics.recordJobQueued()
-		}
+		wp.events.Emit(Event{Type: EventJobQueued, JobID: job.ID(), JobType: job.Type})
 		return job.ID(), nil
 	case <-time.After(wp.queueSubmitTimeout):
 		return 0, ErrQueueTimeout
@@ -226,41 +218,66 @@ func (wp *WriteSerialiser) processJob(item workItem) {
 	queueWait := time.Since(item.queuedAt)
 	start := time.Now()
 
+	wp.events.Emit(Event{
+		Type:      EventJobStarted,
+		JobID:     item.job.ID(),
+		JobType:   item.job.Type,
+		QueueWait: queueWait,
+	})
+
 	var result JobResult
-	var jobType string
 
 	// Execute jobs directly without wrapper methods
 	switch item.job.Type {
 	case JobTypeQuery:
-		jobType = "query"
 		result = wp.executeQuery(item.ctx, item.job.Query)
 
 	case JobTypeBatch:
-		jobType = "batch"
 		result = item.job.BatchJob.ExecuteWithContext(item.ctx, wp.db)
 
 	case JobTypeTransaction:
-		jobType = "transaction"
 		result = item.job.Transaction.ExecuteWithContext(item.ctx, wp.db)
 
 	default:
-		jobType = "unknown"
 		result = NewQueryResult(QueryResult{
 			id:  item.job.ID(),
 			err: ErrInvalidQuery,
 		})
 	}
 
-	// Record metrics in single batched call
-	if wp.metrics != nil {
-		wp.metrics.recordJobExecution(queueWait, time.Since(start), result.Error() != nil, jobType)
+	execTime := time.Since(start)
+
+	// Only query jobs have a single SQL statement and a retry counter.
+	// Batch and transaction jobs contain multiple statements, so these
+	// fields are left at zero for them.
+	var jobSQL string
+	var attempt int
+	if item.job.Type == JobTypeQuery {
+		jobSQL = item.job.Query.SQL
+		attempt = item.job.Query.retries
 	}
 
-	// Handle failed async jobs using callback to Manager
-	if result.Error() != nil && item.resultChan == nil && wp.onAsyncError != nil {
-		if item.job.Type == JobTypeQuery && item.job.Query.async {
-			wp.onAsyncError(item.job.Query, result.Error(), result.Duration())
-		}
+	if result.Error() != nil {
+		wp.events.Emit(Event{
+			Type:      EventJobFailed,
+			JobID:     item.job.ID(),
+			JobType:   item.job.Type,
+			SQL:       jobSQL,
+			QueueWait: queueWait,
+			ExecTime:  execTime,
+			Err:       result.Error(),
+			Attempt:   attempt,
+		})
+	} else {
+		wp.events.Emit(Event{
+			Type:      EventJobCompleted,
+			JobID:     item.job.ID(),
+			JobType:   item.job.Type,
+			SQL:       jobSQL,
+			QueueWait: queueWait,
+			ExecTime:  execTime,
+			Attempt:   attempt,
+		})
 	}
 
 	// Deliver result if someone is waiting

@@ -2,8 +2,6 @@ package qwr
 
 import (
 	"context"
-	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,13 +13,14 @@ type BatchCollector struct {
 	timer   *time.Timer      // Timer for timeout-based batch flushing
 	mutex   sync.Mutex       // Protects batch state during concurrent access
 	ws      *WriteSerialiser // Worker pool for async job execution
+	events  *EventBus        // Event bus for notifications
 	options Options          // Configuration options for batch behavior
 	dbPath  string           // Database path for logging context
 	ctx     context.Context  // Context for all batch operations (never nil)
 }
 
 // NewBatchCollector creates a new batch collector with pre-allocated capacity and context.
-func NewBatchCollector(ctx context.Context, ws *WriteSerialiser, options Options, dbPath string) *BatchCollector {
+func NewBatchCollector(ctx context.Context, ws *WriteSerialiser, events *EventBus, options Options, dbPath string) *BatchCollector {
 	if ctx == nil {
 		panic("BatchCollector requires a non-nil context")
 	}
@@ -29,18 +28,11 @@ func NewBatchCollector(ctx context.Context, ws *WriteSerialiser, options Options
 	return &BatchCollector{
 		queries: make([]Job, 0, options.BatchSize),
 		ws:      ws,
+		events:  events,
 		options: options,
 		dbPath:  dbPath,
 		ctx:     ctx,
 	}
-}
-
-// dbName extracts the database filename for logging context
-func (bc *BatchCollector) dbName() string {
-	if bc.dbPath == "" {
-		return ""
-	}
-	return filepath.Base(bc.dbPath)
 }
 
 // Add adds a job to the current batch for eventual execution using the collector's context
@@ -61,7 +53,7 @@ func (bc *BatchCollector) Add(job Job) {
 	// Add to batch
 	bc.queries = append(bc.queries, job)
 
-	slog.Debug("Added query to batch", "current_size", len(bc.queries), "max_size", bc.options.BatchSize, "db", bc.dbName())
+	bc.events.Emit(Event{Type: EventBatchQueryAdded, BatchSize: len(bc.queries)})
 
 	// Check if we need to flush due to size
 	if len(bc.queries) >= bc.options.BatchSize {
@@ -71,8 +63,6 @@ func (bc *BatchCollector) Add(job Job) {
 
 // startBatchTimer starts the timeout timer for batch flushing
 func (bc *BatchCollector) startBatchTimer() {
-	slog.Debug("Starting batch timer", "timeout", bc.options.BatchTimeout, "db", bc.dbName())
-
 	bc.timer = time.AfterFunc(bc.options.BatchTimeout, func() {
 		bc.mutex.Lock()
 		defer bc.mutex.Unlock()
@@ -97,16 +87,22 @@ func (bc *BatchCollector) flushBatch(reason string) {
 	}
 	copy(batchJob.Queries, bc.queries)
 
-	slog.Info("Flushing batch", "reason", reason, "size", batchSize, "batch_id", batchJob.id, "db", bc.dbName())
+	bc.events.Emit(Event{
+		Type:        EventBatchFlushed,
+		BatchID:     batchJob.id,
+		BatchSize:   batchSize,
+		BatchReason: reason,
+	})
 
 	// Process batch (inline inserts if enabled)
 	if bc.options.InlineInserts && batchSize > 1 {
 		if combined, ok := bc.inlineInserts(batchJob.Queries); ok {
-			slog.Info("Combined queries into batches",
-				"original_count", len(batchJob.Queries),
-				"combined_count", len(combined),
-				"batch_id", batchJob.id,
-				"db", bc.dbName())
+			bc.events.Emit(Event{
+				Type:          EventBatchInlineOptimized,
+				BatchID:       batchJob.id,
+				OriginalCount: len(batchJob.Queries),
+				CombinedCount: len(combined),
+			})
 			batchJob.Queries = combined
 		}
 	}
@@ -125,7 +121,7 @@ func (bc *BatchCollector) flushBatch(reason string) {
 // submitBatch sends the batch to the worker queue
 func (bc *BatchCollector) submitBatch(batchJob BatchJob) {
 	if !bc.ws.workerRunning.Load() {
-		slog.Error("Worker not running, cannot submit batch", "batch_id", batchJob.id, "db", bc.dbName())
+		bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "worker_not_running"})
 		return
 	}
 
@@ -137,12 +133,10 @@ func (bc *BatchCollector) submitBatch(batchJob BatchJob) {
 
 	select {
 	case bc.ws.queue <- item:
-		if bc.ws.metrics != nil {
-			bc.ws.metrics.recordJobQueued()
-		}
-		slog.Debug("Submitted batch job", "query_count", len(batchJob.Queries), "batch_id", batchJob.id, "db", bc.dbName())
+		bc.events.Emit(Event{Type: EventJobQueued, JobID: batchJob.id, JobType: JobTypeBatch})
+		bc.events.Emit(Event{Type: EventBatchSubmitted, BatchID: batchJob.id, BatchSize: len(batchJob.Queries)})
 	default:
-		slog.Error("Failed to submit batch - queue full", "batch_id", batchJob.id, "db", bc.dbName())
+		bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "queue_full"})
 	}
 }
 
@@ -150,8 +144,6 @@ func (bc *BatchCollector) submitBatch(batchJob BatchJob) {
 func (bc *BatchCollector) Close() {
 	bc.mutex.Lock()
 	defer bc.mutex.Unlock()
-
-	slog.Info("Closing batch collector", "db", bc.dbName())
 
 	if bc.timer != nil {
 		bc.timer.Stop()
@@ -165,16 +157,22 @@ func (bc *BatchCollector) Close() {
 		}
 		copy(batchJob.Queries, bc.queries)
 
-		slog.Info("Flushing final batch before closing", "size", len(bc.queries), "batch_id", batchJob.id, "db", bc.dbName())
+		bc.events.Emit(Event{
+			Type:        EventBatchFlushed,
+			BatchID:     batchJob.id,
+			BatchSize:   len(bc.queries),
+			BatchReason: "close",
+		})
 
 		// Process final batch
 		if bc.options.InlineInserts && len(bc.queries) > 1 {
 			if combined, ok := bc.inlineInserts(batchJob.Queries); ok {
-				slog.Info("Combined queries into batches",
-					"original_count", len(batchJob.Queries),
-					"combined_count", len(combined),
-					"batch_id", batchJob.id,
-					"db", bc.dbName())
+				bc.events.Emit(Event{
+					Type:          EventBatchInlineOptimized,
+					BatchID:       batchJob.id,
+					OriginalCount: len(batchJob.Queries),
+					CombinedCount: len(combined),
+				})
 				batchJob.Queries = combined
 			}
 		}
@@ -192,12 +190,10 @@ func (bc *BatchCollector) Close() {
 
 			select {
 			case bc.ws.queue <- item:
-				if bc.ws.metrics != nil {
-					bc.ws.metrics.recordJobQueued()
-				}
+				bc.events.Emit(Event{Type: EventJobQueued, JobID: batchJob.id, JobType: JobTypeBatch})
 				<-item.resultChan // Wait for completion during close
 			default:
-				slog.Error("Failed to submit final batch - queue full", "batch_id", batchJob.id, "db", bc.dbName())
+				bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "queue_full"})
 			}
 		}
 	}

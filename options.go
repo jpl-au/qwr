@@ -57,16 +57,6 @@ type Options struct {
 	// Default: 1000. Set higher for applications with many unique queries.
 	StmtCacheMaxSize int
 
-	// StmtCacheSampleRate controls detailed metrics sampling (1 in N operations).
-	// Higher values reduce metrics overhead but provide less detailed monitoring.
-	// Default: 100 (sample every 100th operation). Set to 1 for full sampling.
-	StmtCacheSampleRate int64
-
-	// StmtCacheSlowThreshold is the threshold for recording slow query preparation.
-	// Preparations taking longer than this are logged for performance analysis.
-	// Default: 10ms. Typical range: 1ms-100ms depending on performance requirements.
-	StmtCacheSlowThreshold time.Duration
-
 	// ErrorQueueMaxSize is the maximum number of errors to retain in memory.
 	// When full, oldest errors are persisted to disk and removed from memory.
 	// Default: 1000. Higher values provide more error history but use more memory.
@@ -76,11 +66,6 @@ type Options struct {
 	// When enabled, retriable errors (database locks, timeouts) are retried automatically.
 	// Default: false (manual retry control)
 	EnableAutoRetry bool
-
-	// RetryInterval is how often to check for jobs ready to retry.
-	// Shorter intervals provide faster retry response but use more CPU.
-	// Default: 30 seconds. Typical range: 10s-5m depending on urgency needs.
-	RetryInterval time.Duration
 
 	// MaxRetries is the maximum number of retry attempts for a failed job.
 	// After exceeding this limit, jobs are marked as permanently failed.
@@ -104,7 +89,7 @@ type Options struct {
 
 	// RetrySubmitTimeout is the timeout for submitting retry jobs to the worker queue.
 	// Prevents retry logic from hanging when the queue is full or worker is stopped.
-	// Default: 5 seconds. Should be shorter than RetryInterval.
+	// Default: 5 seconds.
 	RetrySubmitTimeout time.Duration
 
 	// QueueSubmitTimeout is the timeout for context-free submissions to wait for queue space.
@@ -112,11 +97,6 @@ type Options struct {
 	// Prevents deadlock when queue is full by failing after this timeout.
 	// Default: 5 minutes. Should be long enough to allow queue to drain during high load.
 	QueueSubmitTimeout time.Duration
-
-	// EnableMetrics determines whether to collect performance and operational metrics.
-	// When disabled, all metrics collection is skipped for better performance.
-	// Default: true (metrics collection enabled)
-	EnableMetrics bool
 
 	// UsePreparedStatements makes all queries use prepared statements by default.
 	// Individual queries can still override this with the Prepared() method.
@@ -151,10 +131,6 @@ func (o *Options) Validate() error {
 		o.MaxRetries = 3
 	}
 
-	if o.StmtCacheSampleRate < 1 {
-		o.StmtCacheSampleRate = 100
-	}
-
 	return nil
 }
 
@@ -176,20 +152,10 @@ func (o *Options) SetDefaults() {
 		o.BatchTimeout = 1 * time.Second
 	}
 
-	if o.StmtCacheSampleRate <= 0 {
-		o.StmtCacheSampleRate = 100
-	}
-	if o.StmtCacheSlowThreshold <= 0 {
-		o.StmtCacheSlowThreshold = 10 * time.Millisecond
-	}
-
 	if o.ErrorQueueMaxSize <= 0 {
 		o.ErrorQueueMaxSize = o.WorkerQueueDepth
 	}
 
-	if o.RetryInterval <= 0 {
-		o.RetryInterval = 30 * time.Second
-	}
 	if o.MaxRetries <= 0 {
 		o.MaxRetries = 3
 	}
@@ -211,32 +177,28 @@ func (o *Options) SetDefaults() {
 		o.QueueSubmitTimeout = 5 * time.Minute
 	}
 
-	// Note: Boolean defaults (InlineInserts, EnableMetrics) are handled by
-	// copying from DefaultOptions when creating a new Manager.
-	// We don't set them here because we can't distinguish between
-	// explicitly set false and unset (both are false).
+	// Note: Boolean defaults (InlineInserts) are handled by copying from
+	// DefaultOptions when creating a new Manager. We don't set them here
+	// because we can't distinguish between explicitly set false and unset
+	// (both are false).
 }
 
 // DefaultOptions provides a common starting point for configuration.
 var DefaultOptions = Options{
-	WorkerQueueDepth:       1000,
-	EnableReader:           true,
-	EnableWriter:           true,
-	BatchSize:              200,
-	BatchTimeout:           1 * time.Second,
-	InlineInserts:          false,
-	UseContexts:            false,
-	StmtCacheMaxSize:       1000,
-	StmtCacheSampleRate:    100,
-	StmtCacheSlowThreshold: 10 * time.Millisecond,
-	ErrorQueueMaxSize:      1000,
-	EnableAutoRetry:        false,
-	RetryInterval:          30 * time.Second,
-	MaxRetries:             3,
-	BaseRetryDelay:         30 * time.Second,
-	JobTimeout:             30 * time.Second,
-	TransactionTimeout:     30 * time.Second,
-	RetrySubmitTimeout:     5 * time.Second,
-	QueueSubmitTimeout:     5 * time.Minute,
-	EnableMetrics:          true,
+	WorkerQueueDepth:   1000,
+	EnableReader:       true,
+	EnableWriter:       true,
+	BatchSize:          200,
+	BatchTimeout:       1 * time.Second,
+	InlineInserts:      false,
+	UseContexts:        false,
+	StmtCacheMaxSize:   1000,
+	ErrorQueueMaxSize:  1000,
+	EnableAutoRetry:    false,
+	MaxRetries:         3,
+	BaseRetryDelay:     30 * time.Second,
+	JobTimeout:         30 * time.Second,
+	TransactionTimeout: 30 * time.Second,
+	RetrySubmitTimeout: 5 * time.Second,
+	QueueSubmitTimeout: 5 * time.Minute,
 }

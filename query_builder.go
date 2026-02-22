@@ -121,9 +121,22 @@ func (qb *QueryBuilder) Write() (*QueryResult, error) {
 
 	result.duration = time.Since(start)
 
-	// Record metrics
-	if qb.manager.serialiser != nil && qb.manager.serialiser.metrics != nil && qb.manager.options.EnableMetrics {
-		qb.manager.serialiser.metrics.recordDirectWrite(result.duration, result.err != nil)
+	if result.err != nil {
+		qb.manager.events.Emit(Event{
+			Type:     EventDirectWriteFailed,
+			JobID:    qb.query.id,
+			SQL:      qb.query.SQL,
+			ExecTime: result.duration,
+			Err:      result.err,
+		})
+	} else {
+		qb.manager.events.Emit(Event{
+			Type:     EventDirectWriteCompleted,
+			JobID:    qb.query.id,
+			SQL:      qb.query.SQL,
+			ExecTime: result.duration,
+			Result:   result.SQLResult,
+		})
 	}
 
 	ReleaseQueryBuilder(qb)

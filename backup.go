@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"os"
 
 	"github.com/jpl-au/qwr/backup"
@@ -42,7 +41,7 @@ func (m *Manager) Backup(dest string, method backup.Method) error {
 	case backup.Default:
 		err := m.backupAPI(dest, db)
 		if err == ErrBackupDriverUnsupported {
-			slog.Info("Backup API not supported by driver, falling back to VACUUM INTO", "db", m.Database())
+			m.events.Emit(Event{Type: EventBackupFallback, BackupDest: dest})
 			return m.backupVacuum(dest, db)
 		}
 		return err
@@ -72,7 +71,7 @@ func (m *Manager) backupDB() *sql.DB {
 
 // backupAPI performs backup using SQLite's online backup API.
 func (m *Manager) backupAPI(dest string, db *sql.DB) error {
-	slog.Info("Starting database backup", "method", "backup_api", "dest", dest, "db", m.Database())
+	m.events.Emit(Event{Type: EventBackupStarted, BackupMethod: "api", BackupDest: dest})
 
 	conn, err := db.Conn(context.Background())
 	if err != nil {
@@ -104,25 +103,25 @@ func (m *Manager) backupAPI(dest string, db *sql.DB) error {
 
 	if err != nil {
 		if err != ErrBackupDriverUnsupported {
-			slog.Error("Backup failed", "error", err, "dest", dest, "db", m.Database())
+			m.events.Emit(Event{Type: EventBackupFailed, BackupMethod: "api", BackupDest: dest, Err: err})
 		}
 		return err
 	}
 
-	slog.Info("Backup completed", "method", "backup_api", "dest", dest, "db", m.Database())
+	m.events.Emit(Event{Type: EventBackupCompleted, BackupMethod: "api", BackupDest: dest})
 	return nil
 }
 
 // backupVacuum performs backup using SQLite's VACUUM INTO command.
 func (m *Manager) backupVacuum(dest string, db *sql.DB) error {
-	slog.Info("Starting database backup", "method", "vacuum_into", "dest", dest, "db", m.Database())
+	m.events.Emit(Event{Type: EventBackupStarted, BackupMethod: "vacuum", BackupDest: dest})
 
 	_, err := db.Exec(fmt.Sprintf("VACUUM INTO '%s'", dest))
 	if err != nil {
-		slog.Error("Backup failed", "error", err, "dest", dest, "db", m.Database())
+		m.events.Emit(Event{Type: EventBackupFailed, BackupMethod: "vacuum", BackupDest: dest, Err: err})
 		return fmt.Errorf("%w: %v", ErrBackupFailed, err)
 	}
 
-	slog.Info("Backup completed", "method", "vacuum_into", "dest", dest, "db", m.Database())
+	m.events.Emit(Event{Type: EventBackupCompleted, BackupMethod: "vacuum", BackupDest: dest})
 	return nil
 }

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -19,7 +18,8 @@ type qwrBuilder struct {
 	*Manager
 
 	// Builder-specific fields
-	path string
+	path             string
+	pendingObservers []EventHandler
 }
 
 // New creates a new qwr Manager instance builder
@@ -140,10 +140,16 @@ func (mb *qwrBuilder) Writer(p *profile.Profile) *qwrBuilder {
 // In-memory error logging could cause unbounded memory growth in long-running applications.
 func (mb *qwrBuilder) WithErrorDB(path string) *qwrBuilder {
 	if path == ":memory:" {
-		slog.Warn("Rejecting :memory: for error log database - could cause unbounded memory growth. Error logging will be disabled.")
 		return mb
 	}
 	mb.options.ErrorLogPath = path
+	return mb
+}
+
+// WithObserver registers an event handler that will receive events from the
+// moment the manager is opened. Use this to capture EventManagerOpened.
+func (mb *qwrBuilder) WithObserver(handler EventHandler) *qwrBuilder {
+	mb.pendingObservers = append(mb.pendingObservers, handler)
 	return mb
 }
 
@@ -186,10 +192,12 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		}
 	}
 
-	// Initialise metrics if enabled - required for statement caches
-	var metrics *Metrics
-	if mb.options.EnableMetrics {
-		metrics = NewMetrics()
+	// Create EventBus early so it's available for all components
+	mb.events = NewEventBus()
+
+	// Register any pending observers from WithObserver()
+	for _, handler := range mb.pendingObservers {
+		mb.events.Subscribe(handler)
 	}
 
 	// Initialise reader if enabled
@@ -200,7 +208,6 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 
 		// Open database if not already provided by user
 		if mb.reader == nil {
-			slog.Debug("Opening reader connection", "path", mb.path)
 			var err error
 			mb.reader, err = open(mb.path, mb.readerProfile)
 			if err != nil {
@@ -208,23 +215,14 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 			}
 		} else {
 			// Apply profile to user-provided database
-			slog.Debug("Applying reader profile to user-provided connection")
 			if err := mb.readerProfile.Apply(mb.reader); err != nil {
 				return nil, fmt.Errorf("failed to apply reader profile: %w", err)
 			}
 		}
 
 		// Initialise reader statement cache
-		slog.Debug("Initialising reader statement cache")
-		var readerMetrics *StmtCacheMetrics
-		if metrics != nil {
-			readerMetrics = &metrics.ReaderStmtMetrics
-		}
 		var err error
-		mb.readStmtCache, err = NewStmtCache(
-			readerMetrics,
-			mb.options,
-		)
+		mb.readStmtCache, err = NewStmtCache(mb.events, mb.options)
 		if err != nil {
 			_ = mb.reader.Close()
 			return nil, fmt.Errorf("failed to create reader statement cache: %w", err)
@@ -241,7 +239,6 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 
 		// Open database if not already provided by user
 		if mb.writer == nil {
-			slog.Debug("Opening writer connection", "path", mb.path)
 			mb.writer, err = open(mb.path, mb.writerProfile)
 			if err != nil {
 				if mb.reader != nil {
@@ -251,7 +248,6 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 			}
 		} else {
 			// Apply profile to user-provided database
-			slog.Debug("Applying writer profile to user-provided connection")
 			if err := mb.writerProfile.Apply(mb.writer); err != nil {
 				if mb.reader != nil {
 					_ = mb.reader.Close()
@@ -261,15 +257,7 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		}
 
 		// Initialise writer statement cache
-		slog.Debug("Initialising writer statement cache")
-		var writerMetrics *StmtCacheMetrics
-		if metrics != nil {
-			writerMetrics = &metrics.WriterStmtMetrics
-		}
-		mb.writeStmtCache, err = NewStmtCache(
-			writerMetrics,
-			mb.options,
-		)
+		mb.writeStmtCache, err = NewStmtCache(mb.events, mb.options)
 		if err != nil {
 			if mb.reader != nil {
 				_ = mb.reader.Close()
@@ -278,23 +266,17 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 			return nil, fmt.Errorf("failed to create writer statement cache: %w", err)
 		}
 
-		// Create worker pool - no ErrorQueue dependency
-		slog.Debug("Initialising worker pool")
+		// Create worker pool
 		mb.serialiser = NewWorkerPool(
 			mb.writer,
 			mb.options.WorkerQueueDepth,
-			metrics,
+			mb.events,
 			mb.writeStmtCache,
 			mb.options,
 		)
 
 		// Initialise ErrorQueue
-		// Only initialise with persistent DB if ErrorLogPath is explicitly set
-		slog.Debug("Initialising error queue", "errorLogPath", mb.options.ErrorLogPath)
-		mb.errorQueue = NewErrorQueue(nil, metrics, mb.options, mb.path)
-
-		// Set up async error handler - Manager handles retries
-		mb.serialiser.SetAsyncErrorHandler(mb.handleAsyncError)
+		mb.errorQueue = NewErrorQueue(mb.events, mb.options, mb.path)
 
 		// Start the worker pool
 		if mb.ctx != nil {
@@ -303,24 +285,24 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 			mb.serialiser.Start(context.Background())
 		}
 
-		// Start retry processor if auto-retry is enabled
+		// Wire retry subscriber if auto-retry is enabled
 		if mb.options.EnableAutoRetry {
-			mb.startRetryProcessor()
+			mb.events.SubscribeFiltered(func(e Event) {
+				mb.handleRetryEvent(e)
+			}, func(t EventType) bool { return t == EventJobFailed })
 		}
 
 		// Initialise batch collector
-		slog.Debug("Initialising batch collector",
-			"batchSize", mb.options.BatchSize,
-			"timeout", mb.options.BatchTimeout)
 		mb.batcher = NewBatchCollector(
 			mb.internalCtx,
 			mb.serialiser,
+			mb.events,
 			mb.options,
 			mb.path,
 		)
 	}
 
-	slog.Info("qwr manager initialised successfully: " + mb.Database())
+	mb.events.Emit(Event{Type: EventManagerOpened})
 	return mb.Manager, nil
 }
 

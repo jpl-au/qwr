@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -20,6 +19,7 @@ type Manager struct {
 	serialiser     *WriteSerialiser
 	batcher        *BatchCollector
 	errorQueue     *ErrorQueue
+	events         *EventBus
 	options        Options
 	ctx            context.Context // User-facing context (can be nil)
 	internalCtx    context.Context // Internal context for batching (never nil)
@@ -37,6 +37,23 @@ func (m *Manager) Database() string {
 		return ""
 	}
 	return filepath.Base(m.path)
+}
+
+// Subscribe registers an event handler that receives all events.
+// Returns a subscription ID for later removal via Unsubscribe.
+func (m *Manager) Subscribe(handler EventHandler) uint64 {
+	return m.events.Subscribe(handler)
+}
+
+// SubscribeFiltered registers an event handler with a filter.
+// The handler only receives events for which filter returns true.
+func (m *Manager) SubscribeFiltered(handler EventHandler, filter EventFilter) uint64 {
+	return m.events.SubscribeFiltered(handler, filter)
+}
+
+// Unsubscribe removes a previously registered event handler.
+func (m *Manager) Unsubscribe(id uint64) {
+	m.events.Unsubscribe(id)
 }
 
 // Query creates a new query with the given SQL and arguments
@@ -61,27 +78,31 @@ func (m *Manager) Query(sql string, args ...any) *QueryBuilder {
 // Batch adds a job to be executed as part of a batch
 func (m *Manager) Batch(job Job) error {
 	if m.writer == nil || m.serialiser == nil || m.batcher == nil {
-		slog.Error("Writer is disabled", "db", m.Database())
 		return ErrWriterDisabled
 	}
 
-	slog.Debug("Adding job to batch", "id", job.ID(), "db", m.Database())
 	m.batcher.Add(job)
 	return nil
 }
 
-// handleAsyncError processes async job errors - called by WriteSerialiser
-func (m *Manager) handleAsyncError(query Query, err error, duration time.Duration) {
+// handleRetryEvent processes failed job events for automatic retry.
+// Registered as an internal subscriber when EnableAutoRetry is true.
+func (m *Manager) handleRetryEvent(e Event) {
 	if m.errorQueue == nil {
 		return
 	}
 
-	qwrErr := ClassifyError(err, "async_query")
+	// Only handle async query failures
+	if e.JobType != JobTypeQuery {
+		return
+	}
+
+	qwrErr := ClassifyError(e.Err, "async_query")
 	jobErr := JobError{
-		Query:     query,
-		err:       err,
+		Query:     Query{SQL: e.SQL, id: e.JobID, async: true, retries: e.Attempt},
+		err:       e.Err,
 		timestamp: time.Now(),
-		duration:  duration,
+		duration:  e.ExecTime,
 		errType:   qwrErr,
 	}
 
@@ -91,41 +112,25 @@ func (m *Manager) handleAsyncError(query Query, err error, duration time.Duratio
 	}
 
 	m.errorQueue.Store(jobErr)
-}
 
-// startRetryProcessor begins processing retries in the background
-func (m *Manager) startRetryProcessor() {
-	if m.errorQueue == nil || m.serialiser == nil || m.ctx == nil {
-		return
-	}
-
-	go func() {
-		ticker := time.NewTicker(m.options.RetryInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				m.processRetries()
-			case <-m.ctx.Done():
-				return
-			}
+	if !qwrErr.IsRetriable() || jobErr.Query.retries >= m.options.MaxRetries {
+		if qwrErr.IsRetriable() {
+			m.events.Emit(Event{Type: EventRetryExhausted, JobID: e.JobID, Err: e.Err, Attempt: jobErr.Query.retries})
 		}
-	}()
-}
-
-// processRetries handles retry logic - calls Query directly instead of through JobError wrapper
-func (m *Manager) processRetries() {
-	if m.errorQueue == nil || m.serialiser == nil {
 		return
 	}
 
-	readyJobs := m.errorQueue.GetReadyForRetry(time.Now(), m.options.MaxRetries)
-	if len(readyJobs) == 0 {
-		return
+	m.events.Emit(Event{Type: EventRetryScheduled, JobID: e.JobID, Attempt: jobErr.Query.retries + 1, NextRetry: jobErr.nextRetryAt})
+
+	// Schedule retry at the exact calculated time
+	delay := time.Until(jobErr.nextRetryAt)
+	if delay < 0 {
+		delay = 0
 	}
 
-	for _, jobErr := range readyJobs {
+	time.AfterFunc(delay, func() {
+		m.events.Emit(Event{Type: EventRetryStarted, JobID: e.JobID, Attempt: jobErr.Query.retries + 1})
+
 		retryQuery := jobErr.CreateRetryQuery()
 		retryQuery.async = true
 
@@ -134,96 +139,76 @@ func (m *Manager) processRetries() {
 		cancel()
 
 		if err != nil {
-			// Failed to resubmit
 			if retryQuery.retries >= m.options.MaxRetries {
 				m.errorQueue.Remove(jobErr.Query.ID())
 				m.errorQueue.PersistError(jobErr, "max_retries_exceeded")
-			} else {
-				// Update retry count and next retry time
-				updatedJobErr := jobErr
-				updatedJobErr.Query.retries = retryQuery.retries
-				updatedJobErr.CalculateNextRetry(m.options.BaseRetryDelay)
-				m.errorQueue.Store(updatedJobErr)
+				m.events.Emit(Event{Type: EventRetryExhausted, JobID: e.JobID, Err: e.Err, Attempt: retryQuery.retries})
 			}
 		} else {
-			// Successfully resubmitted
 			m.errorQueue.Remove(jobErr.Query.ID())
-			// Record the retry in metrics
-			if m.serialiser != nil && m.serialiser.metrics != nil {
-				m.serialiser.metrics.recordErrorRetried()
-			}
-			slog.Debug("Successfully resubmitted job for retry",
-				"jobID", jobErr.Query.ID(),
-				"attempt", retryQuery.retries,
-				"db", m.Database())
 		}
-	}
+	})
 }
 
 // Close closes all database connections and stops the worker pool
 func (m *Manager) Close() error {
 	var errs []error
 
+	m.events.Emit(Event{Type: EventManagerClosing})
+
 	// Stop batch collector
 	if m.batcher != nil {
-		slog.Info("Closing batch collector", "db", m.Database())
 		m.batcher.Close()
 	}
 
 	// Stop worker pool
 	if m.serialiser != nil {
-		slog.Info("Stopping worker pool", "db", m.Database())
 		if err := m.serialiser.Stop(); err != nil {
-			slog.Error("Error stopping worker pool", "error", err, "db", m.Database())
 			errs = append(errs, err)
 		}
 	}
 
 	// Close error queue
 	if m.errorQueue != nil {
-		slog.Info("Closing error queue", "db", m.Database())
 		m.errorQueue.Close()
 	}
 
 	// Close statement caches
 	if m.readStmtCache != nil {
-		slog.Info("Closing reader statement cache", "db", m.Database())
 		m.readStmtCache.Close()
 	}
 
 	if m.writeStmtCache != nil {
-		slog.Info("Closing writer statement cache", "db", m.Database())
 		m.writeStmtCache.Close()
 	}
 
 	// Run WAL checkpoint if configured (before closing writer)
 	if m.checkpoint != checkpoint.None && m.writer != nil {
-		slog.Info("Running WAL checkpoint on close", "mode", m.checkpoint, "db", m.Database())
+		m.events.Emit(Event{Type: EventCheckpointStarted, CheckpointMode: string(m.checkpoint)})
 		if _, err := m.writer.Exec(fmt.Sprintf("PRAGMA wal_checkpoint(%s)", m.checkpoint)); err != nil {
-			slog.Error("Error running WAL checkpoint", "error", err, "db", m.Database())
+			m.events.Emit(Event{Type: EventCheckpointFailed, CheckpointMode: string(m.checkpoint), Err: err})
 			errs = append(errs, err)
+		} else {
+			m.events.Emit(Event{Type: EventCheckpointCompleted, CheckpointMode: string(m.checkpoint)})
 		}
 	}
 
 	// Close writer
 	if m.writer != nil {
-		slog.Info("Closing writer connection", "db", m.Database())
 		if err := m.writer.Close(); err != nil {
-			slog.Error("Error closing writer", "error", err, "db", m.Database())
 			errs = append(errs, err)
 		}
 	}
 
 	// Close reader
 	if m.reader != nil {
-		slog.Info("Closing reader connection", "db", m.Database())
 		if err := m.reader.Close(); err != nil {
-			slog.Error("Error closing reader", "error", err, "db", m.Database())
 			errs = append(errs, err)
 		}
 	}
 
-	slog.Info("qwr manager closed", "db", m.Database())
+	m.events.Emit(Event{Type: EventManagerClosed})
+	m.events.Close()
 
 	if len(errs) > 0 {
 		return errs[0] // Return first error for now
@@ -231,93 +216,8 @@ func (m *Manager) Close() error {
 	return nil
 }
 
-// GetMetrics returns the current write performance metrics
-func (m *Manager) GetMetrics() MetricsSnapshot {
-	if m.serialiser != nil && m.serialiser.metrics != nil {
-		return m.serialiser.metrics.Snapshot()
-	}
-	return MetricsSnapshot{} // Empty snapshot if no metrics
-}
-
-// GetCacheMetrics returns the current statement cache metrics
-func (m *Manager) GetCacheMetrics() map[string]StmtCacheStats {
-	metrics := make(map[string]StmtCacheStats)
-
-	if m.serialiser != nil && m.serialiser.metrics != nil {
-		metrics["reader"] = m.serialiser.metrics.ReaderStmtMetrics.Stats()
-		metrics["writer"] = m.serialiser.metrics.WriterStmtMetrics.Stats()
-	}
-
-	return metrics
-}
-
-// GetDetailedCacheMetrics returns enhanced cache metrics with detailed information
-func (m *Manager) GetDetailedCacheMetrics() map[string]interface{} {
-	result := make(map[string]interface{})
-
-	if m.serialiser != nil && m.serialiser.metrics != nil {
-		result["reader"] = m.serialiser.metrics.ReaderStmtMetrics.Stats()
-		result["writer"] = m.serialiser.metrics.WriterStmtMetrics.Stats()
-	}
-
-	return result
-}
-
-// GetErrorQueueStats returns basic error queue statistics
-func (m *Manager) GetErrorQueueStats() ErrorQueueStats {
-	if m.errorQueue == nil {
-		return ErrorQueueStats{}
-	}
-
-	return ErrorQueueStats{
-		CurrentSize: m.errorQueue.Count(),
-	}
-}
-
-// ResetMetrics resets the write performance metrics
-func (m *Manager) ResetMetrics() {
-	if m.serialiser != nil && m.serialiser.metrics != nil {
-		slog.Info("Resetting write metrics", "db", m.Database())
-		m.serialiser.metrics.Reset()
-	}
-}
-
-// ResetCaches clears all cached prepared statements, freeing memory.
-// The cache remains usable - new statements will be prepared on demand.
-func (m *Manager) ResetCaches() {
-	if m.readStmtCache != nil {
-		m.readStmtCache.Clear()
-	}
-	if m.writeStmtCache != nil {
-		m.writeStmtCache.Clear()
-	}
-}
-
-// ResetCacheDetailedMetrics resets only the detailed cache metrics
-func (m *Manager) ResetCacheDetailedMetrics() {
-	if m.readStmtCache != nil && m.serialiser != nil && m.serialiser.metrics != nil {
-		slog.Info("Resetting reader cache detailed metrics", "db", m.Database())
-		m.serialiser.metrics.ReaderStmtMetrics.mu.Lock()
-		m.serialiser.metrics.ReaderStmtMetrics.hitsByQuery = make(map[string]int64)
-		m.serialiser.metrics.ReaderStmtMetrics.slowQueries = m.serialiser.metrics.ReaderStmtMetrics.slowQueries[:0]
-		m.serialiser.metrics.ReaderStmtMetrics.lastReset = time.Now()
-		m.serialiser.metrics.ReaderStmtMetrics.mu.Unlock()
-	}
-
-	if m.writeStmtCache != nil && m.serialiser != nil && m.serialiser.metrics != nil {
-		slog.Info("Resetting writer cache detailed metrics", "db", m.Database())
-		m.serialiser.metrics.WriterStmtMetrics.mu.Lock()
-		m.serialiser.metrics.WriterStmtMetrics.hitsByQuery = make(map[string]int64)
-		m.serialiser.metrics.WriterStmtMetrics.slowQueries = m.serialiser.metrics.WriterStmtMetrics.slowQueries[:0]
-		m.serialiser.metrics.WriterStmtMetrics.lastReset = time.Now()
-		m.serialiser.metrics.WriterStmtMetrics.mu.Unlock()
-	}
-}
-
 // WaitForIdle waits until all operations are processed
 func (m *Manager) WaitForIdle(ctx context.Context) error {
-	slog.Info("Waiting for all operations to complete", "db", m.Database())
-
 	// Start with shorter intervals, back off as we wait longer
 	intervals := []time.Duration{
 		50 * time.Millisecond,  // First few checks
@@ -332,11 +232,13 @@ func (m *Manager) WaitForIdle(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			slog.Warn("Wait for idle cancelled by context", "error", ctx.Err(), "db", m.Database())
 			return ctx.Err()
 		default:
 			// Check if queue is empty and batch collector is idle
-			metrics := m.GetMetrics()
+			queueLen := 0
+			if m.serialiser != nil {
+				queueLen = m.serialiser.QueueLen()
+			}
 			batchSize := 0
 			if m.batcher != nil {
 				m.batcher.mutex.Lock()
@@ -344,8 +246,7 @@ func (m *Manager) WaitForIdle(ctx context.Context) error {
 				m.batcher.mutex.Unlock()
 			}
 
-			if metrics.CurrentQueueLen == 0 && batchSize == 0 {
-				slog.Info("All operations completed", "db", m.Database())
+			if queueLen == 0 && batchSize == 0 {
 				return nil
 			}
 
@@ -430,13 +331,29 @@ func (m *Manager) RetryJob(jobID int64) error {
 	return nil
 }
 
+// ResetCaches clears all cached prepared statements, freeing memory.
+// The cache remains usable - new statements will be prepared on demand.
+func (m *Manager) ResetCaches() {
+	if m.readStmtCache != nil {
+		m.readStmtCache.Clear()
+	}
+	if m.writeStmtCache != nil {
+		m.writeStmtCache.Clear()
+	}
+}
+
 // RunVacuum performs a VACUUM operation (full database rebuild)
 func (m *Manager) RunVacuum() error {
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
-	slog.Info("Running VACUUM", "db", m.Database())
+	m.events.Emit(Event{Type: EventVacuumStarted})
 	_, err := m.writer.Exec("VACUUM")
+	if err != nil {
+		m.events.Emit(Event{Type: EventVacuumFailed, Err: err})
+	} else {
+		m.events.Emit(Event{Type: EventVacuumCompleted})
+	}
 	return err
 }
 
@@ -448,8 +365,13 @@ func (m *Manager) RunIncrementalVacuum(pages int) error {
 	if pages < 0 {
 		return fmt.Errorf("invalid pages value: must be non-negative, got %d", pages)
 	}
-	slog.Info("Running incremental VACUUM", "pages", pages, "db", m.Database())
+	m.events.Emit(Event{Type: EventVacuumStarted})
 	_, err := m.writer.Exec("PRAGMA incremental_vacuum(?)", pages)
+	if err != nil {
+		m.events.Emit(Event{Type: EventVacuumFailed, Err: err})
+	} else {
+		m.events.Emit(Event{Type: EventVacuumCompleted})
+	}
 	return err
 }
 
@@ -461,8 +383,13 @@ func (m *Manager) RunCheckpoint(mode checkpoint.Mode) error {
 	if mode == checkpoint.None {
 		return nil
 	}
-	slog.Info("Running WAL checkpoint", "mode", mode, "db", m.Database())
+	m.events.Emit(Event{Type: EventCheckpointStarted, CheckpointMode: string(mode)})
 	_, err := m.writer.Exec(fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode))
+	if err != nil {
+		m.events.Emit(Event{Type: EventCheckpointFailed, CheckpointMode: string(mode), Err: err})
+	} else {
+		m.events.Emit(Event{Type: EventCheckpointCompleted, CheckpointMode: string(mode)})
+	}
 	return err
 }
 
@@ -475,7 +402,6 @@ func (m *Manager) SetSecureDelete(enabled bool) error {
 	if enabled {
 		val = "ON"
 	}
-	slog.Info("Setting secure_delete", "enabled", enabled, "db", m.Database())
 	_, err := m.writer.Exec(fmt.Sprintf("PRAGMA secure_delete = %s", val))
 	return err
 }

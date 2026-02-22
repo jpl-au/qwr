@@ -150,7 +150,7 @@ if err := row.Scan(&name); err != nil {
 
 ### Prepared Statements
 
-Prepared statements are cached in a sync.Map automatically when enabled. This reduces preparation overhead for repeated queries:
+Prepared statements are cached automatically when enabled. This reduces preparation overhead for repeated queries:
 ```go
 result, err := manager.Query("INSERT INTO users (name) VALUES (?)", "Alice").
     Prepared().
@@ -205,9 +205,48 @@ manager, err := qwr.New("test.db").
     Open()
 ```
 
-## Logging
+## Observing Events
 
-qwr uses `slog.Default()` for all internal logging. Configure your application's default logger using `slog.SetDefault()` to control qwr's log output, format, and level.
+qwr emits structured events for all significant operations. Subscribe to receive events for logging, metrics, tracing, or alerting:
+
+```go
+// Subscribe to all events
+manager.Subscribe(func(e qwr.Event) {
+    fmt.Printf("event: %d at %v\n", e.Type, e.Timestamp)
+})
+
+// Subscribe to specific event types using filters
+manager.SubscribeFiltered(func(e qwr.Event) {
+    fmt.Printf("error: %v\n", e.Err)
+}, qwr.ErrorEvents())
+
+// Unsubscribe when no longer needed
+id := manager.Subscribe(handler)
+manager.Unsubscribe(id)
+```
+
+To capture events from the moment the manager opens (including `EventManagerOpened`), use `WithObserver` during construction:
+
+```go
+manager, err := qwr.New("test.db").
+    WithObserver(func(e qwr.Event) {
+        log.Printf("qwr: %d", e.Type)
+    }).
+    Open()
+```
+
+Available filter constructors:
+
+| Filter | Matches |
+|--------|---------|
+| `JobEvents()` | `JobQueued`, `JobStarted`, `JobCompleted`, `JobFailed` |
+| `ErrorEvents()` | `JobFailed`, `ErrorStored`, `ErrorPersisted`, `ErrorQueueOverflow`, `RetryExhausted`, `DirectWriteFailed` |
+| `CacheEvents()` | `CacheHit`, `CacheMiss`, `CacheEvicted`, `CachePrepError` |
+| `RetryEvents()` | `RetryScheduled`, `RetryStarted`, `RetryExhausted` |
+| `WriteEvents()` | `JobQueued`, `JobStarted`, `JobCompleted`, `JobFailed`, `DirectWriteCompleted`, `DirectWriteFailed` |
+| `BatchEvents()` | `BatchQueryAdded`, `BatchFlushed`, `BatchInlineOptimized`, `BatchSubmitted`, `BatchSubmitFailed` |
+| `BackupEvents()` | `BackupStarted`, `BackupCompleted`, `BackupFailed`, `BackupFallback` |
+| `LifecycleEvents()` | `ManagerOpened`, `ManagerClosing`, `ManagerClosed`, `WorkerStarted`, `WorkerStopped` |
 
 ## Configuration Options
 
@@ -219,19 +258,18 @@ options := qwr.Options{
     WorkerQueueDepth:  50000,         // Queue buffer size
     EnableReader:      true,          // Enable read operations
     EnableWriter:      true,          // Enable write operations
-    
+
     // Batching
     BatchSize:         200,           // Queries per batch
     BatchTimeout:      1*time.Second, // Max batch wait time
     InlineInserts:     false,         // Experimental: combine INSERT statements
-    
-    // Context behaviour  
+
+    // Context behaviour
     UseContexts:       false,         // Default context usage
-    
+
     // Statement caching
+    StmtCacheMaxSize:      1000,      // Max cached prepared statements
     UsePreparedStatements: false,     // Use prepared statements for all queries by default
-    StmtCacheSampleRate: 100,         // Metrics sampling rate (1 in N operations)
-    StmtCacheSlowThreshold: 10*time.Millisecond, // Threshold for slow query logging
 
     // Error handling
     ErrorQueueMaxSize: 1000,          // Max errors in memory
@@ -239,16 +277,12 @@ options := qwr.Options{
     EnableAutoRetry:   false,         // Automatic retry
     MaxRetries:        3,             // Max retry attempts
     BaseRetryDelay:    30*time.Second,// Initial retry delay
-    RetryInterval:     30*time.Second,// Retry check frequency
-    
+
     // Timeouts
     JobTimeout:         30*time.Second, // Individual job timeout
     TransactionTimeout: 30*time.Second, // Transaction timeout
     RetrySubmitTimeout: 5*time.Second,  // Retry submission timeout
     QueueSubmitTimeout: 5*time.Minute,  // Timeout for context-free queue submissions
-
-    // Monitoring
-    EnableMetrics:      true,            // Enable metrics collection
 }
 ```
 
@@ -288,14 +322,15 @@ If `WithErrorDB()` is not called, error logging is disabled. Using `:memory:` is
 ### Retry Configuration
 ```go
 options := qwr.Options{
-    EnableAutoRetry:   true,
-    MaxRetries:        3,
-    BaseRetryDelay:    30 * time.Second,
-    RetryInterval:     30 * time.Second,
+    EnableAutoRetry: true,
+    MaxRetries:      3,
+    BaseRetryDelay:  30 * time.Second,
 }
 
 manager, err := qwr.New("test.db", options).Open()
 ```
+
+When auto-retry is enabled, each retriable failure schedules its own retry using the calculated exponential backoff delay. No polling is needed.
 
 ### Error Queue Management
 ```go
@@ -342,7 +377,7 @@ options := qwr.Options{
 ```
 
 ### Statement Caching
-Prepared statements are stored in memory to avoid re-parsing SQL. The cache uses `sync.Map` and grows unbounded - there are no size limits enforced.
+Prepared statements are cached using ristretto with LRU eviction. The maximum size is controlled by `StmtCacheMaxSize` (default: 1000).
 
 ### Inline INSERT Optimisation (Experimental)
 Inline INSERT optimises statements with identical SQL are combined into a single multi-value INSERT:
@@ -356,39 +391,39 @@ INSERT INTO users (name) VALUES ('Charlie')
 INSERT INTO users (name) VALUES ('Alice'), ('Bob'), ('Charlie')
 ```
 
-## Monitoring & Metrics
+## Monitoring
 
-qwr provides basic performance monitoring and operational visibility. Metrics collection can be disabled for performance.
+qwr emits structured events for all significant operations. Subscribe to events to build custom monitoring:
 
-### Metrics Configuration
 ```go
-options := qwr.Options{
-    EnableMetrics: true,  // Enable/disable metrics collection (default: true)
-}
+// Count completed jobs
+var jobsCompleted atomic.Int64
+manager.SubscribeFiltered(func(e qwr.Event) {
+    jobsCompleted.Add(1)
+}, qwr.JobEvents())
+
+// Track cache hit ratio
+var hits, misses atomic.Int64
+manager.SubscribeFiltered(func(e qwr.Event) {
+    if e.Type == qwr.EventCacheHit {
+        hits.Add(1)
+    } else if e.Type == qwr.EventCacheMiss {
+        misses.Add(1)
+    }
+}, qwr.CacheEvents())
+
+// Log errors
+manager.SubscribeFiltered(func(e qwr.Event) {
+    log.Printf("qwr error: %v (job %d)", e.Err, e.JobID)
+}, qwr.ErrorEvents())
 ```
 
-### Performance Metrics
-```go
-metrics := manager.GetMetrics()
-fmt.Printf("Jobs processed: %d\n", metrics.JobsProcessed)
-fmt.Printf("Processing rate: %.2f jobs/sec\n", metrics.ProcessingRate)
-fmt.Printf("Error rate: %.2f%%\n", metrics.ErrorRate*100)
-fmt.Printf("Queue length: %d\n", metrics.CurrentQueueLen)
-```
+### Observer Performance & Safety
 
-### Cache Metrics
-```go
-cacheMetrics := manager.GetCacheMetrics()
-for name, stats := range cacheMetrics {
-    fmt.Printf("%s cache hit ratio: %.2f%%\n", name, stats.HitRatio*100)
-}
-```
-
-### Error Queue Stats
-```go
-errorStats := manager.GetErrorQueueStats()
-fmt.Printf("Pending retries: %d\n", errorStats.PendingRetries)
-```
+*   **Synchronous Dispatch:** Event handlers are executed synchronously on the caller's goroutine (e.g., the write worker loop). **Never** perform blocking I/O or slow operations directly in a handler; always offload them to a separate goroutine if they might block.
+*   **Re-entrancy:** It is safe to call `Subscribe` or `Unsubscribe` from within an event handler (the subscriber list is snapshot-copied before dispatch). However, this is not recommended as it makes event flow harder to reason about.
+*   **Panic Isolation:** Panics in event handlers are recovered automatically and will not crash the caller. However, handlers should still handle their own errors gracefully to avoid silent failures.
+*   **Lifecycle Guarantees:** `EventManagerClosed` is the last event emitted and is guaranteed to be delivered before `Close()` returns. After `Close()`, no further events are dispatched.
 
 ### Wait for Queue to Drain
 ```go
@@ -404,9 +439,6 @@ if err := manager.WaitForIdle(ctx); err != nil {
 ```go
 // Clear statement cache (frees memory, cache rebuilds on demand)
 manager.ResetCaches()
-
-// Reset metrics only
-manager.ResetMetrics()
 ```
 
 ### Database Maintenance
@@ -451,13 +483,9 @@ Available checkpoint modes:
 
 ## Caveats & Design Decisions
 
-### Unbounded Statement Cache
+### Statement Cache
 
-The prepared statement cache uses `sync.Map` and **grows without bounds** - there is no size limit or eviction policy.
-
-This is an intentional design decision to maximise performance. Most applications use a finite set of SQL queries, so the cache naturally reaches a stable size.
-
-Applications that generate dynamic SQL with varying literals (e.g., embedding timestamps or IDs directly in SQL strings instead of using parameters) will cause unbounded memory growth.
+The prepared statement cache uses [ristretto](https://github.com/dgraph-io/ristretto) with LRU eviction. The maximum cache size is controlled by `StmtCacheMaxSize` (default: 1000). When the cache is full, least recently used statements are evicted.
 
 - Always use parameterised queries with `?` placeholders
 - Avoid building SQL strings with dynamic values embedded

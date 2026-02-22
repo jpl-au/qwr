@@ -75,9 +75,19 @@ func (t *Transaction) Write() (*TransactionResult, error) {
 	execTime := time.Since(start)
 	failed := result.TransactionResult.err != nil
 
-	// Record metrics as direct write since it bypasses worker pool
-	if t.manager.serialiser != nil && t.manager.serialiser.metrics != nil && t.manager.options.EnableMetrics {
-		t.manager.serialiser.metrics.recordDirectWrite(execTime, failed)
+	if failed {
+		t.manager.events.Emit(Event{
+			Type:     EventDirectWriteFailed,
+			JobID:    t.id,
+			ExecTime: execTime,
+			Err:      result.TransactionResult.err,
+		})
+	} else {
+		t.manager.events.Emit(Event{
+			Type:     EventDirectWriteCompleted,
+			JobID:    t.id,
+			ExecTime: execTime,
+		})
 	}
 
 	return &result.TransactionResult, result.TransactionResult.err
