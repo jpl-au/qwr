@@ -1,6 +1,6 @@
 module github.com/jpl-au/qwr
 
-go 1.25.3
+go 1.25.0
 
 require (
 	github.com/dgraph-io/ristretto v0.2.0
