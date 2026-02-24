@@ -1,6 +1,7 @@
 package qwr
 
 import (
+	"log/slog"
 	"slices"
 	"sync"
 	"time"
@@ -132,8 +133,16 @@ func (eb *EventBus) Emit(event Event) {
 // invokeHandler calls the handler and recovers from any panics so that a
 // faulty handler cannot crash the write worker or other internal goroutines.
 func (eb *EventBus) invokeHandler(handler EventHandler, event Event) {
+	start := time.Now()
 	defer func() {
 		recover()
+		duration := time.Since(start)
+		if duration > 100*time.Millisecond {
+			slog.Warn("slow event handler detected",
+				"event_type", event.Type.String(),
+				"duration", duration,
+				"recommendation", "handlers must not block; use background goroutines for I/O")
+		}
 	}()
 	handler(event)
 }

@@ -68,10 +68,10 @@ const (
 	// EventBatchFlushed is emitted when a batch is flushed for execution.
 	// Fields: BatchID, BatchSize, BatchReason ("size_limit"|"timeout"|"close").
 	EventBatchFlushed
-	// EventBatchInlineOptimized is emitted when inline INSERT combining
+	// EventBatchInlineOptimised is emitted when inline INSERT combining
 	// reduces the number of queries in a batch.
 	// Fields: BatchID, OriginalCount, CombinedCount.
-	EventBatchInlineOptimized
+	EventBatchInlineOptimised
 	// EventBatchSubmitted is emitted after a batch is placed on the worker queue.
 	// Fields: BatchID, BatchSize.
 	EventBatchSubmitted
@@ -184,6 +184,17 @@ const (
 	// EventWorkerStopped is emitted when the write worker goroutine exits.
 	// No extra fields.
 	EventWorkerStopped
+
+	// --- Reader ---
+	// Filter: ReadEvents()
+
+	// EventReaderQueryCompleted is emitted after a synchronous Read(), ReadRow(),
+	// or ReadClose() succeeds.
+	// Fields: ExecTime. Query reads also set SQL.
+	EventReaderQueryCompleted
+	// EventReaderQueryFailed is emitted when a reader operation fails.
+	// Fields: ExecTime, Err. Query reads also set SQL.
+	EventReaderQueryFailed
 )
 
 // String returns the name of the event type (e.g. "EventJobCompleted").
@@ -209,7 +220,7 @@ var eventTypeNames = [...]string{
 	EventDirectWriteFailed:     "EventDirectWriteFailed",
 	EventBatchQueryAdded:       "EventBatchQueryAdded",
 	EventBatchFlushed:          "EventBatchFlushed",
-	EventBatchInlineOptimized:  "EventBatchInlineOptimized",
+	EventBatchInlineOptimised:  "EventBatchInlineOptimised",
 	EventBatchSubmitted:        "EventBatchSubmitted",
 	EventBatchSubmitFailed:     "EventBatchSubmitFailed",
 	EventErrorStored:           "EventErrorStored",
@@ -237,6 +248,8 @@ var eventTypeNames = [...]string{
 	EventCheckpointFailed:      "EventCheckpointFailed",
 	EventWorkerStarted:         "EventWorkerStarted",
 	EventWorkerStopped:         "EventWorkerStopped",
+	EventReaderQueryCompleted:  "EventReaderQueryCompleted",
+	EventReaderQueryFailed:     "EventReaderQueryFailed",
 }
 
 // Event carries data for a single occurrence in the qwr system.

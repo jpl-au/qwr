@@ -313,6 +313,7 @@ func (qb *QueryBuilder) Read() (*sql.Rows, error) {
 		return nil, ErrInvalidQuery
 	}
 
+	start := time.Now()
 	var rows *sql.Rows
 	var err error
 	var stmt *sql.Stmt
@@ -336,6 +337,22 @@ func (qb *QueryBuilder) Read() (*sql.Rows, error) {
 		} else {
 			rows, err = qb.manager.reader.Query(qb.query.SQL, qb.query.Args...)
 		}
+	}
+
+	duration := time.Since(start)
+	if err != nil {
+		qb.manager.events.Emit(Event{
+			Type:     EventReaderQueryFailed,
+			SQL:      qb.query.SQL,
+			Err:      err,
+			ExecTime: duration,
+		})
+	} else {
+		qb.manager.events.Emit(Event{
+			Type:     EventReaderQueryCompleted,
+			SQL:      qb.query.SQL,
+			ExecTime: duration,
+		})
 	}
 
 	ReleaseQueryBuilder(qb)
@@ -392,6 +409,7 @@ func (qb *QueryBuilder) ReadRow() (*sql.Row, error) {
 		return nil, ErrInvalidQuery
 	}
 
+	start := time.Now()
 	var row *sql.Row
 	var err error
 
@@ -414,6 +432,25 @@ func (qb *QueryBuilder) ReadRow() (*sql.Row, error) {
 		} else {
 			row = qb.manager.reader.QueryRow(qb.query.SQL, qb.query.Args...)
 		}
+	}
+
+	duration := time.Since(start)
+	// We always emit "Completed" for ReadRow because the actual error (like ErrNoRows)
+	// is only known when the user calls Scan() on the returned Row.
+	// If preparation fails, we emit "Failed".
+	if err != nil {
+		qb.manager.events.Emit(Event{
+			Type:     EventReaderQueryFailed,
+			SQL:      qb.query.SQL,
+			Err:      err,
+			ExecTime: duration,
+		})
+	} else {
+		qb.manager.events.Emit(Event{
+			Type:     EventReaderQueryCompleted,
+			SQL:      qb.query.SQL,
+			ExecTime: duration,
+		})
 	}
 
 	ReleaseQueryBuilder(qb)

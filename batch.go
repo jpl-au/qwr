@@ -98,7 +98,7 @@ func (bc *BatchCollector) flushBatch(reason string) {
 	if bc.options.InlineInserts && batchSize > 1 {
 		if combined, ok := bc.inlineInserts(batchJob.Queries); ok {
 			bc.events.Emit(Event{
-				Type:          EventBatchInlineOptimized,
+				Type:          EventBatchInlineOptimised,
 				BatchID:       batchJob.id,
 				OriginalCount: len(batchJob.Queries),
 				CombinedCount: len(combined),
@@ -168,7 +168,7 @@ func (bc *BatchCollector) Close() {
 		if bc.options.InlineInserts && len(bc.queries) > 1 {
 			if combined, ok := bc.inlineInserts(batchJob.Queries); ok {
 				bc.events.Emit(Event{
-					Type:          EventBatchInlineOptimized,
+					Type:          EventBatchInlineOptimised,
 					BatchID:       batchJob.id,
 					OriginalCount: len(batchJob.Queries),
 					CombinedCount: len(combined),

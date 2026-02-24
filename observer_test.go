@@ -138,16 +138,18 @@ func TestObserverPattern(t *testing.T) {
 	})
 
 	// 4. Batching Events
-	// This demonstrates how the observer pattern captures internal batching behavior.
+	// This demonstrates how the observer pattern captures internal batching behaviour.
 	t.Run("BatchingEvents", func(t *testing.T) {
 		opts := Options{
-			BatchSize:    2,
-			BatchTimeout: 100 * time.Millisecond,
+			BatchSize:      2,
+			BatchTimeout:   100 * time.Millisecond,
+			InlineInserts:  true,
 		}
 		mgr := newTestMgr(t, opts)
 		defer mgr.Close()
+		setupTable(t, mgr)
 
-		var batchFlushed bool
+		var batchFlushed, batchOptimised bool
 		var mu sync.Mutex
 		
 		mgr.SubscribeFiltered(func(e Event) {
@@ -161,17 +163,24 @@ func TestObserverPattern(t *testing.T) {
 					t.Errorf("expected reason size_limit, got %s", e.BatchReason)
 				}
 			}
+			if e.Type == EventBatchInlineOptimised {
+				batchOptimised = true
+			}
 			mu.Unlock()
 		}, BatchEvents())
 
-		// Add two items to trigger the batch limit
-		mgr.Query("INSERT INTO users (name) VALUES (?)", "batch1").Batch()
-		mgr.Query("INSERT INTO users (name) VALUES (?)", "batch2").Batch()
+		// Add two items with identical SQL to trigger inline optimisation
+		sql := "INSERT INTO users (name) VALUES (?)"
+		mgr.Query(sql, "batch1").Batch()
+		mgr.Query(sql, "batch2").Batch()
 		mgr.WaitForIdle(context.Background())
 
 		mu.Lock()
 		if !batchFlushed {
 			t.Error("EventBatchFlushed not received")
+		}
+		if !batchOptimised {
+			t.Error("EventBatchInlineOptimised not received")
 		}
 		mu.Unlock()
 	})

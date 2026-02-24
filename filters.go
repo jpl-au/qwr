@@ -17,13 +17,27 @@ func JobEvents() EventFilter {
 // (EventJobFailed, EventDirectWriteFailed) in addition to error queue and
 // retry exhaustion events.
 //
-// Matches: EventJobFailed, EventDirectWriteFailed, EventErrorStored,
-// EventErrorPersisted, EventErrorQueueOverflow, EventRetryExhausted.
+// Matches: EventJobFailed, EventDirectWriteFailed, EventReaderQueryFailed,
+// EventErrorStored, EventErrorPersisted, EventErrorQueueOverflow,
+// EventRetryExhausted.
 func ErrorEvents() EventFilter {
 	return func(t EventType) bool {
 		switch t {
-		case EventJobFailed, EventDirectWriteFailed, EventErrorStored,
-			EventErrorPersisted, EventErrorQueueOverflow, EventRetryExhausted:
+		case EventJobFailed, EventDirectWriteFailed, EventReaderQueryFailed,
+			EventErrorStored, EventErrorPersisted, EventErrorQueueOverflow,
+			EventRetryExhausted:
+			return true
+		}
+		return false
+	}
+}
+
+// ReadEvents returns a filter matching reader-side events:
+// EventReaderQueryCompleted, EventReaderQueryFailed.
+func ReadEvents() EventFilter {
+	return func(t EventType) bool {
+		switch t {
+		case EventReaderQueryCompleted, EventReaderQueryFailed:
 			return true
 		}
 		return false
@@ -70,12 +84,12 @@ func WriteEvents() EventFilter {
 }
 
 // BatchEvents returns a filter matching batch lifecycle events:
-// EventBatchQueryAdded, EventBatchFlushed, EventBatchInlineOptimized,
+// EventBatchQueryAdded, EventBatchFlushed, EventBatchInlineOptimised,
 // EventBatchSubmitted, EventBatchSubmitFailed.
 func BatchEvents() EventFilter {
 	return func(t EventType) bool {
 		switch t {
-		case EventBatchQueryAdded, EventBatchFlushed, EventBatchInlineOptimized,
+		case EventBatchQueryAdded, EventBatchFlushed, EventBatchInlineOptimised,
 			EventBatchSubmitted, EventBatchSubmitFailed:
 			return true
 		}
