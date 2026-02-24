@@ -322,6 +322,13 @@ func (qb *QueryBuilder) Read() (*sql.Rows, error) {
 	if qb.query.prepared && qb.manager.readStmtCache != nil {
 		stmt, err = qb.manager.readStmtCache.Get(qb.manager.reader, qb.query.SQL)
 		if err != nil {
+			duration := time.Since(start)
+			qb.manager.events.Emit(Event{
+				Type:     EventReaderQueryFailed,
+				SQL:      qb.query.SQL,
+				Err:      err,
+				ExecTime: duration,
+			})
 			ReleaseQueryBuilder(qb)
 			return nil, err
 		}
@@ -415,8 +422,16 @@ func (qb *QueryBuilder) ReadRow() (*sql.Row, error) {
 
 	// Execute read query
 	if qb.query.prepared && qb.manager.readStmtCache != nil {
-		stmt, err := qb.manager.readStmtCache.Get(qb.manager.reader, qb.query.SQL)
+		var stmt *sql.Stmt
+		stmt, err = qb.manager.readStmtCache.Get(qb.manager.reader, qb.query.SQL)
 		if err != nil {
+			duration := time.Since(start)
+			qb.manager.events.Emit(Event{
+				Type:     EventReaderQueryFailed,
+				SQL:      qb.query.SQL,
+				Err:      err,
+				ExecTime: duration,
+			})
 			ReleaseQueryBuilder(qb)
 			return nil, err
 		}
@@ -435,26 +450,17 @@ func (qb *QueryBuilder) ReadRow() (*sql.Row, error) {
 	}
 
 	duration := time.Since(start)
-	// We always emit "Completed" for ReadRow because the actual error (like ErrNoRows)
-	// is only known when the user calls Scan() on the returned Row.
-	// If preparation fails, we emit "Failed".
-	if err != nil {
-		qb.manager.events.Emit(Event{
-			Type:     EventReaderQueryFailed,
-			SQL:      qb.query.SQL,
-			Err:      err,
-			ExecTime: duration,
-		})
-	} else {
-		qb.manager.events.Emit(Event{
-			Type:     EventReaderQueryCompleted,
-			SQL:      qb.query.SQL,
-			ExecTime: duration,
-		})
-	}
+	// We always emit "Completed" for successful ReadRow dispatch because the
+	// actual execution error (like ErrNoRows) is only known when the user
+	// calls Scan() on the returned Row.
+	qb.manager.events.Emit(Event{
+		Type:     EventReaderQueryCompleted,
+		SQL:      qb.query.SQL,
+		ExecTime: duration,
+	})
 
 	ReleaseQueryBuilder(qb)
-	return row, err // Note: sql.Row.Scan() is where row-level errors are handled
+	return row, nil // Preparation errors are handled above; Scan errors are caller's responsibility
 }
 
 // Release manually returns the QueryBuilder to the object pool for reuse.

@@ -10,6 +10,10 @@ import (
 
 // TestWatchdogDetection verifies that slow handlers trigger a warning log.
 func TestWatchdogDetection(t *testing.T) {
+	// Save and restore the default logger
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+
 	// Custom slog handler to capture output
 	var buf strings.Builder
 	logger := slog.New(slog.NewTextHandler(&buf, nil))

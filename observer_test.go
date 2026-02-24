@@ -98,7 +98,7 @@ func TestObserverPattern(t *testing.T) {
 	})
 
 	// 3. Extracting Data from Events
-	// The Event struct is a "flat" struct. This example shows how to correctly 
+	// The Event struct is a "flat" struct. This example shows how to correctly
 	// inspect fields based on the EventType.
 	t.Run("EventDataExtraction", func(t *testing.T) {
 		mgr := newTestMgr(t, Options{})
@@ -141,9 +141,9 @@ func TestObserverPattern(t *testing.T) {
 	// This demonstrates how the observer pattern captures internal batching behaviour.
 	t.Run("BatchingEvents", func(t *testing.T) {
 		opts := Options{
-			BatchSize:      2,
-			BatchTimeout:   100 * time.Millisecond,
-			InlineInserts:  true,
+			BatchSize:     2,
+			BatchTimeout:  100 * time.Millisecond,
+			InlineInserts: true,
 		}
 		mgr := newTestMgr(t, opts)
 		defer mgr.Close()
@@ -151,7 +151,7 @@ func TestObserverPattern(t *testing.T) {
 
 		var batchFlushed, batchOptimised bool
 		var mu sync.Mutex
-		
+
 		mgr.SubscribeFiltered(func(e Event) {
 			mu.Lock()
 			if e.Type == EventBatchFlushed {
@@ -246,4 +246,3 @@ func TestObserverPattern(t *testing.T) {
 		}
 	})
 }
-
