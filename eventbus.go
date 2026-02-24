@@ -135,7 +135,11 @@ func (eb *EventBus) Emit(event Event) {
 func (eb *EventBus) invokeHandler(handler EventHandler, event Event) {
 	start := time.Now()
 	defer func() {
-		recover()
+		if r := recover(); r != nil {
+			slog.Error("event handler panicked",
+				"event_type", event.Type.String(),
+				"panic", r)
+		}
 		duration := time.Since(start)
 		if duration > 100*time.Millisecond {
 			slog.Warn("slow event handler detected",

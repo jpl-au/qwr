@@ -195,6 +195,11 @@ const (
 	// EventReaderQueryFailed is emitted when a reader operation fails.
 	// Fields: ExecTime, Err. Query reads also set SQL.
 	EventReaderQueryFailed
+
+	// EventRetrySubmitFailed is emitted when a background retry cannot be
+	// placed on the worker queue.
+	// Fields: JobID, Err.
+	EventRetrySubmitFailed
 )
 
 // String returns the name of the event type (e.g. "EventJobCompleted").
@@ -248,9 +253,11 @@ var eventTypeNames = [...]string{
 	EventCheckpointFailed:     "EventCheckpointFailed",
 	EventWorkerStarted:        "EventWorkerStarted",
 	EventWorkerStopped:        "EventWorkerStopped",
-	EventReaderQueryCompleted: "EventReaderQueryCompleted",
-	EventReaderQueryFailed:    "EventReaderQueryFailed",
-}
+		EventReaderQueryCompleted:  "EventReaderQueryCompleted",
+		EventReaderQueryFailed:     "EventReaderQueryFailed",
+		EventRetrySubmitFailed:     "EventRetrySubmitFailed",
+	}
+	
 
 // Event carries data for a single occurrence in the qwr system.
 //

@@ -39,6 +39,37 @@ func TestWatchdogDetection(t *testing.T) {
 	}
 }
 
+// TestHandlerPanicLogging verifies that handler panics trigger an error log.
+func TestHandlerPanicLogging(t *testing.T) {
+	// Save and restore the default logger
+	original := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	// Custom slog handler to capture output
+	var buf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	slog.SetDefault(logger)
+
+	eb := NewEventBus()
+	defer eb.Close()
+
+	// Register a panicking handler
+	eb.Subscribe(func(e Event) {
+		panic("boom")
+	})
+
+	eb.Emit(Event{Type: EventJobCompleted})
+
+	// Check if error was logged
+	output := buf.String()
+	if !strings.Contains(output, "event handler panicked") {
+		t.Errorf("expected panic error log, got: %q", output)
+	}
+	if !strings.Contains(output, "boom") {
+		t.Errorf("expected panic message in log, got: %q", output)
+	}
+}
+
 // TestReaderEvents verifies that Read and ReadRow emit events.
 func TestReaderEvents(t *testing.T) {
 	mgr := newTestMgr(t, Options{EnableReader: true, EnableWriter: true})

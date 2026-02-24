@@ -18,14 +18,14 @@ func JobEvents() EventFilter {
 // retry exhaustion events.
 //
 // Matches: EventJobFailed, EventDirectWriteFailed, EventReaderQueryFailed,
-// EventErrorStored, EventErrorPersisted, EventErrorQueueOverflow,
-// EventRetryExhausted.
+// EventRetrySubmitFailed, EventErrorStored, EventErrorPersisted,
+// EventErrorQueueOverflow, EventRetryExhausted.
 func ErrorEvents() EventFilter {
 	return func(t EventType) bool {
 		switch t {
 		case EventJobFailed, EventDirectWriteFailed, EventReaderQueryFailed,
-			EventErrorStored, EventErrorPersisted, EventErrorQueueOverflow,
-			EventRetryExhausted:
+			EventRetrySubmitFailed, EventErrorStored, EventErrorPersisted,
+			EventErrorQueueOverflow, EventRetryExhausted:
 			return true
 		}
 		return false
@@ -57,11 +57,11 @@ func CacheEvents() EventFilter {
 }
 
 // RetryEvents returns a filter matching retry lifecycle events:
-// EventRetryScheduled, EventRetryStarted, EventRetryExhausted.
+// EventRetryScheduled, EventRetryStarted, EventRetryExhausted, EventRetrySubmitFailed.
 func RetryEvents() EventFilter {
 	return func(t EventType) bool {
 		switch t {
-		case EventRetryScheduled, EventRetryStarted, EventRetryExhausted:
+		case EventRetryScheduled, EventRetryStarted, EventRetryExhausted, EventRetrySubmitFailed:
 			return true
 		}
 		return false

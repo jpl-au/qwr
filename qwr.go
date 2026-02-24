@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -143,6 +144,14 @@ func (m *Manager) handleRetryEvent(e Event) {
 				m.errorQueue.Remove(jobErr.Query.ID())
 				m.errorQueue.PersistError(jobErr, "max_retries_exceeded")
 				m.events.Emit(Event{Type: EventRetryExhausted, JobID: e.JobID, Err: e.Err, Attempt: retryQuery.retries})
+			} else {
+				// Lost retry: retry submission failed but retries remain.
+				// Emit event and log warning since this is an internal system stall.
+				m.events.Emit(Event{Type: EventRetrySubmitFailed, JobID: e.JobID, Err: err})
+				slog.Warn("failed to submit background retry",
+					"job_id", e.JobID,
+					"error", err,
+					"attempt", retryQuery.retries)
 			}
 		} else {
 			m.errorQueue.Remove(jobErr.Query.ID())
