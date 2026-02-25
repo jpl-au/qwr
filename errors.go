@@ -173,82 +173,42 @@ func (qe *QWRError) WithContext(key string, value any) *QWRError {
 	return qe
 }
 
-// ClassifyError provides enhanced error classification with detailed categorization
+// sqliteErrorCode is satisfied by SQLite driver error types that expose the
+// underlying result code (e.g. modernc.org/sqlite.Error, mattn/go-sqlite3.Error).
+// This keeps classification driver-agnostic — no driver imports needed.
+type sqliteErrorCode interface {
+	Code() int
+}
+
+// SQLite primary result codes used for error classification.
+// These are stable across all SQLite versions and drivers.
+const (
+	sqliteError      = 1  // SQLITE_ERROR — generic error
+	sqlitePerm       = 3  // SQLITE_PERM — access permission denied
+	sqliteBusy       = 5  // SQLITE_BUSY — database file is locked
+	sqliteLocked     = 6  // SQLITE_LOCKED — table in the database is locked
+	sqliteNoMem      = 7  // SQLITE_NOMEM — malloc failed
+	sqliteReadOnly   = 8  // SQLITE_READONLY — attempt to write a readonly database
+	sqliteInterrupt  = 9  // SQLITE_INTERRUPT — operation terminated by sqlite3_interrupt
+	sqliteIOErr      = 10 // SQLITE_IOERR — disk I/O error
+	sqliteCorrupt    = 11 // SQLITE_CORRUPT — database disk image is malformed
+	sqliteFull       = 13 // SQLITE_FULL — database is full
+	sqliteCantOpen   = 14 // SQLITE_CANTOPEN — unable to open the database file
+	sqliteConstraint = 19 // SQLITE_CONSTRAINT — constraint violation
+	sqliteAuth       = 23 // SQLITE_AUTH — authorisation denied
+	sqliteNotADB     = 26 // SQLITE_NOTADB — not a database file
+)
+
+// ClassifyError provides enhanced error classification with detailed categorisation.
+// If the error implements the sqliteErrorCode interface (i.e. exposes a Code() int
+// method), classification uses the structured result code. Otherwise, it falls back
+// to string matching on the error message.
 func ClassifyError(err error, operation string) *QWRError {
 	if err == nil {
 		return NewQWRError(nil, ErrorCategoryInternal, RetryStrategyNone, operation)
 	}
 
-	errMsg := strings.ToLower(err.Error())
-
-	// Database locking errors (most common retriable case)
-	if strings.Contains(errMsg, "database is locked") ||
-		strings.Contains(errMsg, "database locked") ||
-		strings.Contains(errMsg, "sqlite_busy") ||
-		strings.Contains(errMsg, "busy") {
-		return NewQWRError(err, ErrorCategoryLock, RetryStrategyExponential, operation).
-			WithContext("retry_delay", "short").
-			WithContext("max_attempts", 5)
-	}
-
-	// Context timeout errors
-	if strings.Contains(errMsg, "context") &&
-		(strings.Contains(errMsg, "deadline exceeded") || strings.Contains(errMsg, "timeout")) {
-		return NewQWRError(err, ErrorCategoryTimeout, RetryStrategyLinear, operation).
-			WithContext("retry_delay", "medium").
-			WithContext("max_attempts", 3)
-	}
-
-	// File I/O errors (transient, worth retrying)
-	if strings.Contains(errMsg, "i/o error") ||
-		strings.Contains(errMsg, "broken pipe") {
-		return NewQWRError(err, ErrorCategoryConnection, RetryStrategyLinear, operation).
-			WithContext("retry_delay", "medium").
-			WithContext("max_attempts", 2)
-	}
-
-	// Resource exhaustion errors
-	if strings.Contains(errMsg, "disk full") ||
-		strings.Contains(errMsg, "no space left") ||
-		strings.Contains(errMsg, "out of memory") ||
-		strings.Contains(errMsg, "resource temporarily unavailable") {
-		return NewQWRError(err, ErrorCategoryResource, RetryStrategyLinear, operation).
-			WithContext("retry_delay", "long").
-			WithContext("max_attempts", 2)
-	}
-
-	// Constraint violation errors (non-retriable)
-	if strings.Contains(errMsg, "constraint") ||
-		strings.Contains(errMsg, "unique") ||
-		strings.Contains(errMsg, "foreign key") ||
-		strings.Contains(errMsg, "check constraint") ||
-		strings.Contains(errMsg, "not null") ||
-		strings.Contains(errMsg, "primary key") {
-		return NewQWRError(err, ErrorCategoryConstraint, RetryStrategyNone, operation).
-			WithContext("data_issue", true)
-	}
-
-	// Schema-related errors (non-retriable)
-	if strings.Contains(errMsg, "no such table") ||
-		strings.Contains(errMsg, "no such column") ||
-		strings.Contains(errMsg, "ambiguous column") ||
-		strings.Contains(errMsg, "syntax error") ||
-		strings.Contains(errMsg, "near") { // SQLite syntax error pattern
-		return NewQWRError(err, ErrorCategorySchema, RetryStrategyNone, operation).
-			WithContext("schema_issue", true)
-	}
-
-	// Permission/access errors (non-retriable)
-	if strings.Contains(errMsg, "permission denied") ||
-		strings.Contains(errMsg, "access denied") ||
-		strings.Contains(errMsg, "unauthorized") ||
-		strings.Contains(errMsg, "readonly") ||
-		strings.Contains(errMsg, "read-only") {
-		return NewQWRError(err, ErrorCategoryPermission, RetryStrategyNone, operation).
-			WithContext("access_issue", true)
-	}
-
-	// Check for known internal QWR errors
+	// Check for known internal QWR errors first — these are never from SQLite
 	for _, qwrErr := range []error{
 		ErrReaderDisabled, ErrWriterDisabled, ErrWorkerNotRunning,
 		ErrErrorQueueDisabled,
@@ -259,7 +219,111 @@ func ClassifyError(err error, operation string) *QWRError {
 		}
 	}
 
-	// Default to unknown category with no retry for safety
-	return NewQWRError(err, ErrorCategoryUnknown, RetryStrategyNone, operation).
-		WithContext("unclassified", true)
+	// Try structured classification via SQLite error code
+	var coded sqliteErrorCode
+	if errors.As(err, &coded) {
+		return classifySQLiteCode(coded.Code(), err, operation)
+	}
+
+	// Fallback to string matching for drivers that don't expose error codes
+	return classifyByMessage(err, operation)
+}
+
+// classifySQLiteCode maps a SQLite result code to an error category and retry
+// strategy. Extended error codes encode the primary code in the lower byte,
+// so masking with 0xFF gives us the base category.
+func classifySQLiteCode(code int, err error, operation string) *QWRError {
+	primary := code & 0xFF
+
+	switch primary {
+	case sqliteBusy, sqliteLocked:
+		return NewQWRError(err, ErrorCategoryLock, RetryStrategyExponential, operation).
+			WithContext("sqlite_code", code)
+
+	case sqliteIOErr, sqliteCantOpen:
+		return NewQWRError(err, ErrorCategoryConnection, RetryStrategyLinear, operation).
+			WithContext("sqlite_code", code)
+
+	case sqliteConstraint:
+		return NewQWRError(err, ErrorCategoryConstraint, RetryStrategyNone, operation).
+			WithContext("sqlite_code", code)
+
+	case sqliteReadOnly, sqlitePerm, sqliteAuth:
+		return NewQWRError(err, ErrorCategoryPermission, RetryStrategyNone, operation).
+			WithContext("sqlite_code", code)
+
+	case sqliteFull, sqliteNoMem:
+		return NewQWRError(err, ErrorCategoryResource, RetryStrategyLinear, operation).
+			WithContext("sqlite_code", code)
+
+	case sqliteInterrupt:
+		return NewQWRError(err, ErrorCategoryTimeout, RetryStrategyLinear, operation).
+			WithContext("sqlite_code", code)
+
+	case sqliteCorrupt, sqliteNotADB:
+		return NewQWRError(err, ErrorCategorySchema, RetryStrategyNone, operation).
+			WithContext("sqlite_code", code)
+
+	default:
+		return NewQWRError(err, ErrorCategoryUnknown, RetryStrategyNone, operation).
+			WithContext("sqlite_code", code)
+	}
+}
+
+// classifyByMessage uses string matching as a fallback for drivers that don't
+// expose structured error codes. This path is less precise but ensures
+// reasonable classification regardless of the underlying driver.
+func classifyByMessage(err error, operation string) *QWRError {
+	errMsg := strings.ToLower(err.Error())
+
+	// Database locking errors
+	if strings.Contains(errMsg, "database is locked") ||
+		strings.Contains(errMsg, "database locked") {
+		return NewQWRError(err, ErrorCategoryLock, RetryStrategyExponential, operation)
+	}
+
+	// Context timeout errors
+	if strings.Contains(errMsg, "context") &&
+		(strings.Contains(errMsg, "deadline exceeded") || strings.Contains(errMsg, "timeout")) {
+		return NewQWRError(err, ErrorCategoryTimeout, RetryStrategyLinear, operation)
+	}
+
+	// File I/O errors
+	if strings.Contains(errMsg, "i/o error") ||
+		strings.Contains(errMsg, "broken pipe") {
+		return NewQWRError(err, ErrorCategoryConnection, RetryStrategyLinear, operation)
+	}
+
+	// Resource exhaustion errors
+	if strings.Contains(errMsg, "disk full") ||
+		strings.Contains(errMsg, "no space left") ||
+		strings.Contains(errMsg, "out of memory") {
+		return NewQWRError(err, ErrorCategoryResource, RetryStrategyLinear, operation)
+	}
+
+	// Constraint violation errors
+	if strings.Contains(errMsg, "constraint") ||
+		strings.Contains(errMsg, "unique") ||
+		strings.Contains(errMsg, "foreign key") ||
+		strings.Contains(errMsg, "not null") ||
+		strings.Contains(errMsg, "primary key") {
+		return NewQWRError(err, ErrorCategoryConstraint, RetryStrategyNone, operation)
+	}
+
+	// Schema-related errors
+	if strings.Contains(errMsg, "no such table") ||
+		strings.Contains(errMsg, "no such column") ||
+		strings.Contains(errMsg, "syntax error") {
+		return NewQWRError(err, ErrorCategorySchema, RetryStrategyNone, operation)
+	}
+
+	// Permission/access errors
+	if strings.Contains(errMsg, "permission denied") ||
+		strings.Contains(errMsg, "access denied") ||
+		strings.Contains(errMsg, "readonly") ||
+		strings.Contains(errMsg, "read-only") {
+		return NewQWRError(err, ErrorCategoryPermission, RetryStrategyNone, operation)
+	}
+
+	return NewQWRError(err, ErrorCategoryUnknown, RetryStrategyNone, operation)
 }
