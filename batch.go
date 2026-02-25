@@ -85,8 +85,9 @@ func (bc *BatchCollector) flushBatch(reason string) error {
 
 	batchSize := len(bc.queries)
 	batchJob := BatchJob{
-		Queries: make([]Job, len(bc.queries)),
-		id:      nextJobID(),
+		Queries:   make([]Job, len(bc.queries)),
+		id:        nextJobID(),
+		stmtCache: bc.ws.writeCache,
 	}
 	copy(batchJob.Queries, bc.queries)
 
@@ -162,8 +163,9 @@ func (bc *BatchCollector) Close() error {
 	}
 
 	batchJob := BatchJob{
-		Queries: make([]Job, len(bc.queries)),
-		id:      nextJobID(),
+		Queries:   make([]Job, len(bc.queries)),
+		id:        nextJobID(),
+		stmtCache: bc.ws.writeCache,
 	}
 	copy(batchJob.Queries, bc.queries)
 
