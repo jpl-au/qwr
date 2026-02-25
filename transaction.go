@@ -23,7 +23,7 @@ func (m *Manager) Transaction(capacity ...int) *Transaction {
 
 	return &Transaction{
 		queries: make([]Query, 0, cap),
-		id:      time.Now().UnixNano(),
+		id:      nextJobID(),
 		ctx:     nil,
 		manager: m,
 	}
@@ -40,7 +40,7 @@ func (t *Transaction) Add(sql string, args ...any) *Transaction {
 	query := Query{
 		SQL:      sql,
 		Args:     append(make([]any, 0, len(args)), args...),
-		id:       time.Now().UnixNano(),
+		id:       nextJobID(),
 		prepared: false,
 	}
 	t.queries = append(t.queries, query)
@@ -52,7 +52,7 @@ func (t *Transaction) AddPrepared(sql string, args ...any) *Transaction {
 	query := Query{
 		SQL:      sql,
 		Args:     append(make([]any, 0, len(args)), args...),
-		id:       time.Now().UnixNano(),
+		id:       nextJobID(),
 		prepared: true,
 	}
 	t.queries = append(t.queries, query)

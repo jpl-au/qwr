@@ -77,7 +77,7 @@ func (qb *QueryBuilder) Prepared() *QueryBuilder {
 
 // GenID generates a unique ID for this query
 func (qb *QueryBuilder) GenID() *QueryBuilder {
-	qb.query.id = time.Now().UnixNano()
+	qb.query.id = nextJobID()
 	return qb
 }
 

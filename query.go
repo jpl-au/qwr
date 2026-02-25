@@ -3,8 +3,20 @@ package qwr
 import (
 	"context"
 	"database/sql"
+	"sync/atomic"
 	"time"
 )
+
+// jobSeq is a process-wide counter for generating unique job identifiers.
+// Each Add(1) returns a value guaranteed unique across all goroutines,
+// unlike time.Now().UnixNano() which has only microsecond resolution on
+// macOS and can collide under concurrent use.
+var jobSeq atomic.Int64
+
+// nextJobID returns a unique job ID. Safe for concurrent use.
+func nextJobID() int64 {
+	return jobSeq.Add(1)
+}
 
 // Query represents a database query operation
 type Query struct {

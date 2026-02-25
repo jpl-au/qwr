@@ -83,7 +83,7 @@ func (bc *BatchCollector) flushBatch(reason string) {
 	batchSize := len(bc.queries)
 	batchJob := BatchJob{
 		Queries: make([]Job, len(bc.queries)),
-		id:      time.Now().UnixNano(),
+		id:      nextJobID(),
 	}
 	copy(batchJob.Queries, bc.queries)
 
@@ -153,7 +153,7 @@ func (bc *BatchCollector) Close() {
 	if len(bc.queries) > 0 {
 		batchJob := BatchJob{
 			Queries: make([]Job, len(bc.queries)),
-			id:      time.Now().UnixNano(),
+			id:      nextJobID(),
 		}
 		copy(batchJob.Queries, bc.queries)
 
@@ -241,7 +241,7 @@ func (bc *BatchCollector) inlineInserts(items []Job) ([]Job, bool) {
 				combinedQuery := Query{
 					SQL:   combinedSQL,
 					Args:  combinedArgs,
-					id:    time.Now().UnixNano(),
+					id:    nextJobID(),
 					async: true,
 				}
 				combinedJobs = append(combinedJobs, Job{Type: JobTypeQuery, Query: combinedQuery})
