@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jpl-au/qwr/checkpoint"
@@ -31,6 +33,14 @@ type Manager struct {
 	writeStmtCache *StmtCache
 	path           string          // Database path for logging context
 	checkpoint     checkpoint.Mode // WAL checkpoint mode to run on Close()
+
+	// Shutdown coordination
+	closed      atomic.Bool    // fast check for retry callbacks and submissions
+	closeOnce   sync.Once      // ensures Close() runs exactly once
+	closeErr    error          // cached result from first Close()
+	retryMu     sync.Mutex     // protects retryTimers slice
+	retryTimers []*time.Timer  // pending retry timers for cancellation on Close()
+	retryWg     sync.WaitGroup // tracks in-flight retry callbacks
 }
 
 // Database extracts the database filename for logging context
@@ -129,7 +139,20 @@ func (m *Manager) handleRetryEvent(e Event) {
 		delay = 0
 	}
 
-	time.AfterFunc(delay, func() {
+	// Don't schedule if shutdown has begun
+	if m.closed.Load() {
+		return
+	}
+
+	m.retryWg.Add(1)
+	timer := time.AfterFunc(delay, func() {
+		defer m.retryWg.Done()
+
+		// Bail out if shutdown has begun
+		if m.closed.Load() {
+			return
+		}
+
 		m.events.Emit(Event{Type: EventRetryStarted, JobID: e.JobID, Attempt: jobErr.Query.retries + 1})
 
 		retryQuery := jobErr.CreateRetryQuery()
@@ -145,8 +168,6 @@ func (m *Manager) handleRetryEvent(e Event) {
 				m.errorQueue.PersistError(jobErr, "max_retries_exceeded")
 				m.events.Emit(Event{Type: EventRetryExhausted, JobID: e.JobID, Err: e.Err, Attempt: retryQuery.retries})
 			} else {
-				// Lost retry: retry submission failed but retries remain.
-				// Emit event and log warning since this is an internal system stall.
 				m.events.Emit(Event{Type: EventRetrySubmitFailed, JobID: e.JobID, Err: err})
 				slog.Warn("failed to submit background retry",
 					"job_id", e.JobID,
@@ -157,13 +178,44 @@ func (m *Manager) handleRetryEvent(e Event) {
 			m.errorQueue.Remove(jobErr.Query.ID())
 		}
 	})
+
+	m.retryMu.Lock()
+	m.retryTimers = append(m.retryTimers, timer)
+	m.retryMu.Unlock()
 }
 
-// Close closes all database connections and stops the worker pool
+// cancelRetryTimers stops all pending retry timers and waits for any
+// in-flight retry callbacks to complete. Must be called before closing
+// the serialiser, error queue, or event bus.
+func (m *Manager) cancelRetryTimers() {
+	m.closed.Store(true)
+
+	m.retryMu.Lock()
+	for _, t := range m.retryTimers {
+		t.Stop()
+	}
+	m.retryTimers = nil
+	m.retryMu.Unlock()
+
+	m.retryWg.Wait()
+}
+
+// Close closes all database connections and stops the worker pool.
+// Safe to call multiple times — subsequent calls return the same result.
 func (m *Manager) Close() error {
+	m.closeOnce.Do(func() {
+		m.closeErr = m.doClose()
+	})
+	return m.closeErr
+}
+
+func (m *Manager) doClose() error {
 	var errs []error
 
 	m.events.Emit(Event{Type: EventManagerClosing})
+
+	// Cancel pending retries before stopping dependent components
+	m.cancelRetryTimers()
 
 	// Stop batch collector
 	if m.batcher != nil {
