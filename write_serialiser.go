@@ -282,12 +282,7 @@ func (wp *WriteSerialiser) processJob(item workItem) {
 
 	// Deliver result if someone is waiting
 	if item.resultChan != nil {
-		select {
-		case item.resultChan <- result:
-		default:
-			// Nobody listening - still send to buffered channel and close
-			item.resultChan <- result
-		}
+		item.resultChan <- result
 		close(item.resultChan)
 	}
 }

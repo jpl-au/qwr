@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"time"
 )
 
@@ -153,7 +153,7 @@ func (je *JobError) CalculateNextRetry(baseDelay time.Duration) {
 
 	// Add ±25% jitter to prevent synchronized retry storms
 	variation := delay / 4
-	jitter := time.Duration(rand.Int63n(int64(variation*2))) - variation
+	jitter := rand.N(variation*2) - variation
 	delay += jitter
 
 	je.nextRetryAt = time.Now().Add(delay)

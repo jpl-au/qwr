@@ -3,6 +3,7 @@ package qwr
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -220,10 +221,7 @@ func (m *Manager) Close() error {
 	m.events.Emit(Event{Type: EventManagerClosed})
 	m.events.Close()
 
-	if len(errs) > 0 {
-		return errs[0] // Return first error for now
-	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // WaitForIdle waits until all operations are processed
