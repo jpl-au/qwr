@@ -253,11 +253,10 @@ var eventTypeNames = [...]string{
 	EventCheckpointFailed:     "EventCheckpointFailed",
 	EventWorkerStarted:        "EventWorkerStarted",
 	EventWorkerStopped:        "EventWorkerStopped",
-		EventReaderQueryCompleted:  "EventReaderQueryCompleted",
-		EventReaderQueryFailed:     "EventReaderQueryFailed",
-		EventRetrySubmitFailed:     "EventRetrySubmitFailed",
-	}
-	
+	EventReaderQueryCompleted: "EventReaderQueryCompleted",
+	EventReaderQueryFailed:    "EventReaderQueryFailed",
+	EventRetrySubmitFailed:    "EventRetrySubmitFailed",
+}
 
 // Event carries data for a single occurrence in the qwr system.
 //

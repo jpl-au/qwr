@@ -255,8 +255,8 @@ func TestEventBusUnsubscribeFromHandler(t *testing.T) {
 		otherCount++
 	})
 
-	eb.Emit(Event{Type: EventJobQueued})  // first handler runs, unsubscribes self
-	eb.Emit(Event{Type: EventJobQueued})  // first handler should NOT run
+	eb.Emit(Event{Type: EventJobQueued}) // first handler runs, unsubscribes self
+	eb.Emit(Event{Type: EventJobQueued}) // first handler should NOT run
 
 	if count != 1 {
 		t.Errorf("expected self-unsubscribing handler to run once, got %d", count)

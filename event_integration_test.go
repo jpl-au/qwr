@@ -273,4 +273,3 @@ func TestObserverVacuumEvents(t *testing.T) {
 		t.Error("missing EventVacuumCompleted")
 	}
 }
-
