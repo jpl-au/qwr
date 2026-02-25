@@ -31,17 +31,25 @@ func NewStmtCache(events *EventBus, options Options) (*StmtCache, error) {
 		options: options,
 	}
 
-	// Create ristretto cache with eviction callback
+	// Create ristretto cache with eviction and rejection callbacks.
+	// OnReject is critical: when TinyLFU rejects a Set(), the statement
+	// never enters the cache, so the eviction callback never fires.
+	// Without OnReject, rejected statements leak — database/sql does not
+	// set a GC finaliser on *sql.Stmt.
 	c, err := ristretto.NewCache(&ristretto.Config{
 		NumCounters: int64(maxSize * 10), // 10x max size for frequency tracking
 		MaxCost:     int64(maxSize),      // Each statement has cost of 1
 		BufferItems: 64,                  // Internal buffer size
 		OnEvict: func(item *ristretto.Item) {
-			// Close the statement when evicted
 			if stmt, ok := item.Value.(*sql.Stmt); ok {
 				stmt.Close()
 			}
 			cache.events.Emit(Event{Type: EventCacheEvicted})
+		},
+		OnReject: func(item *ristretto.Item) {
+			if stmt, ok := item.Value.(*sql.Stmt); ok {
+				stmt.Close()
+			}
 		},
 	})
 	if err != nil {
@@ -76,11 +84,10 @@ func (c *StmtCache) Get(db *sql.DB, query string) (*sql.Stmt, error) {
 
 	c.events.Emit(Event{Type: EventCacheMiss, CacheQuery: query, CachePrepTime: prepDuration})
 
-	// Store in cache (cost of 1 per statement)
-	if c.cache.Set(query, stmt, 1) {
-		// Wait for value to be stored (ristretto is async)
-		c.cache.Wait()
-	}
+	// Store in cache (cost of 1 per statement). Ristretto processes
+	// Set() asynchronously — a subsequent Get() may miss and prepare
+	// again, but that's cheaper than blocking here with Wait().
+	c.cache.Set(query, stmt, 1)
 
 	return stmt, nil
 }
