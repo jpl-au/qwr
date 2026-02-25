@@ -82,8 +82,7 @@ func (m *Manager) Batch(job Job) error {
 		return ErrWriterDisabled
 	}
 
-	m.batcher.Add(job)
-	return nil
+	return m.batcher.Add(job)
 }
 
 // handleRetryEvent processes failed job events for automatic retry.
@@ -167,7 +166,9 @@ func (m *Manager) Close() error {
 
 	// Stop batch collector
 	if m.batcher != nil {
-		m.batcher.Close()
+		if err := m.batcher.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Stop worker pool

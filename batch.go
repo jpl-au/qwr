@@ -35,8 +35,9 @@ func NewBatchCollector(ctx context.Context, ws *WriteSerialiser, events *EventBu
 	}
 }
 
-// Add adds a job to the current batch for eventual execution using the collector's context
-func (bc *BatchCollector) Add(job Job) {
+// Add adds a job to the current batch for eventual execution using the collector's context.
+// Returns ErrQueueFull if a size-triggered flush cannot submit to the worker queue.
+func (bc *BatchCollector) Add(job Job) error {
 	// Mark query as async if it's a Query type
 	if job.Type == JobTypeQuery {
 		job.Query.async = true
@@ -57,8 +58,9 @@ func (bc *BatchCollector) Add(job Job) {
 
 	// Check if we need to flush due to size
 	if len(bc.queries) >= bc.options.BatchSize {
-		bc.flushBatch("size_limit")
+		return bc.flushBatch("size_limit")
 	}
+	return nil
 }
 
 // startBatchTimer starts the timeout timer for batch flushing
@@ -68,16 +70,17 @@ func (bc *BatchCollector) startBatchTimer() {
 		defer bc.mutex.Unlock()
 
 		if len(bc.queries) > 0 {
-			bc.flushBatch("timeout")
+			bc.flushBatch("timeout") // error emitted via EventBatchSubmitFailed
 		}
 		bc.timer = nil
 	})
 }
 
-// flushBatch processes and submits the current batch (must be called with mutex held)
-func (bc *BatchCollector) flushBatch(reason string) {
+// flushBatch processes and submits the current batch (must be called with mutex held).
+// Returns ErrQueueFull if the worker queue cannot accept the batch.
+func (bc *BatchCollector) flushBatch(reason string) error {
 	if len(bc.queries) == 0 {
-		return
+		return nil
 	}
 
 	batchSize := len(bc.queries)
@@ -115,14 +118,15 @@ func (bc *BatchCollector) flushBatch(reason string) {
 	}
 
 	// Submit to worker queue
-	bc.submitBatch(batchJob)
+	return bc.submitBatch(batchJob)
 }
 
-// submitBatch sends the batch to the worker queue
-func (bc *BatchCollector) submitBatch(batchJob BatchJob) {
+// submitBatch sends the batch to the worker queue.
+// Returns ErrWorkerNotRunning or ErrQueueFull if submission fails.
+func (bc *BatchCollector) submitBatch(batchJob BatchJob) error {
 	if !bc.ws.workerRunning.Load() {
 		bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "worker_not_running"})
-		return
+		return ErrWorkerNotRunning
 	}
 
 	item := workItem{
@@ -135,13 +139,16 @@ func (bc *BatchCollector) submitBatch(batchJob BatchJob) {
 	case bc.ws.queue <- item:
 		bc.events.Emit(Event{Type: EventJobQueued, JobID: batchJob.id, JobType: JobTypeBatch})
 		bc.events.Emit(Event{Type: EventBatchSubmitted, BatchID: batchJob.id, BatchSize: len(batchJob.Queries)})
+		return nil
 	default:
 		bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "queue_full"})
+		return ErrQueueFull
 	}
 }
 
-// Close flushes any pending batch and stops the timer
-func (bc *BatchCollector) Close() {
+// Close flushes any pending batch and stops the timer.
+// Returns ErrQueueFull if the final batch cannot be submitted.
+func (bc *BatchCollector) Close() error {
 	bc.mutex.Lock()
 	defer bc.mutex.Unlock()
 
@@ -150,52 +157,59 @@ func (bc *BatchCollector) Close() {
 		bc.timer = nil
 	}
 
-	if len(bc.queries) > 0 {
-		batchJob := BatchJob{
-			Queries: make([]Job, len(bc.queries)),
-			id:      nextJobID(),
+	if len(bc.queries) == 0 {
+		return nil
+	}
+
+	batchJob := BatchJob{
+		Queries: make([]Job, len(bc.queries)),
+		id:      nextJobID(),
+	}
+	copy(batchJob.Queries, bc.queries)
+
+	bc.events.Emit(Event{
+		Type:        EventBatchFlushed,
+		BatchID:     batchJob.id,
+		BatchSize:   len(bc.queries),
+		BatchReason: "close",
+	})
+
+	// Process final batch
+	if bc.options.InlineInserts && len(bc.queries) > 1 {
+		if combined, ok := bc.inlineInserts(batchJob.Queries); ok {
+			bc.events.Emit(Event{
+				Type:          EventBatchInlineOptimised,
+				BatchID:       batchJob.id,
+				OriginalCount: len(batchJob.Queries),
+				CombinedCount: len(combined),
+			})
+			batchJob.Queries = combined
 		}
-		copy(batchJob.Queries, bc.queries)
+	}
 
-		bc.events.Emit(Event{
-			Type:        EventBatchFlushed,
-			BatchID:     batchJob.id,
-			BatchSize:   len(bc.queries),
-			BatchReason: "close",
-		})
+	bc.queries = bc.queries[:0]
 
-		// Process final batch
-		if bc.options.InlineInserts && len(bc.queries) > 1 {
-			if combined, ok := bc.inlineInserts(batchJob.Queries); ok {
-				bc.events.Emit(Event{
-					Type:          EventBatchInlineOptimised,
-					BatchID:       batchJob.id,
-					OriginalCount: len(batchJob.Queries),
-					CombinedCount: len(combined),
-				})
-				batchJob.Queries = combined
-			}
-		}
+	// Synchronous submission for close
+	if !bc.ws.workerRunning.Load() {
+		bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "worker_not_running"})
+		return ErrWorkerNotRunning
+	}
 
-		bc.queries = bc.queries[:0]
+	item := workItem{
+		job:        Job{Type: JobTypeBatch, BatchJob: batchJob},
+		ctx:        bc.ctx,
+		queuedAt:   time.Now(),
+		resultChan: make(chan JobResult, 1),
+	}
 
-		// Synchronous submission for close
-		if bc.ws.workerRunning.Load() {
-			item := workItem{
-				job:        Job{Type: JobTypeBatch, BatchJob: batchJob},
-				ctx:        bc.ctx,
-				queuedAt:   time.Now(),
-				resultChan: make(chan JobResult, 1),
-			}
-
-			select {
-			case bc.ws.queue <- item:
-				bc.events.Emit(Event{Type: EventJobQueued, JobID: batchJob.id, JobType: JobTypeBatch})
-				<-item.resultChan // Wait for completion during close
-			default:
-				bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "queue_full"})
-			}
-		}
+	select {
+	case bc.ws.queue <- item:
+		bc.events.Emit(Event{Type: EventJobQueued, JobID: batchJob.id, JobType: JobTypeBatch})
+		<-item.resultChan // Wait for completion during close
+		return nil
+	default:
+		bc.events.Emit(Event{Type: EventBatchSubmitFailed, BatchID: batchJob.id, BatchReason: "queue_full"})
+		return ErrQueueFull
 	}
 }
 

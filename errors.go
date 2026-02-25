@@ -35,6 +35,7 @@ var (
 	ErrBackupStep                = errors.New("backup step failed")
 	ErrBackupConnection          = errors.New("failed to get connection for backup")
 	ErrBackupInvalidMethod       = errors.New("unknown backup method")
+	ErrQueueFull                 = errors.New("worker queue is full")
 )
 
 // ErrorCategory provides granular error classification for better handling
@@ -198,19 +199,16 @@ func ClassifyError(err error, operation string) *QWRError {
 			WithContext("max_attempts", 3)
 	}
 
-	// File I/O and access errors
+	// File I/O errors (transient, worth retrying)
 	if strings.Contains(errMsg, "i/o error") ||
-		strings.Contains(errMsg, "broken pipe") ||
-		strings.Contains(errMsg, "permission denied") ||
-		strings.Contains(errMsg, "access denied") {
+		strings.Contains(errMsg, "broken pipe") {
 		return NewQWRError(err, ErrorCategoryConnection, RetryStrategyLinear, operation).
 			WithContext("retry_delay", "medium").
 			WithContext("max_attempts", 2)
 	}
 
 	// Resource exhaustion errors
-	if strings.Contains(errMsg, "i/o error") ||
-		strings.Contains(errMsg, "disk full") ||
+	if strings.Contains(errMsg, "disk full") ||
 		strings.Contains(errMsg, "no space left") ||
 		strings.Contains(errMsg, "out of memory") ||
 		strings.Contains(errMsg, "resource temporarily unavailable") {

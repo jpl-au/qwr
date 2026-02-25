@@ -293,10 +293,10 @@ func (qb *QueryBuilder) Batch() (int64, error) {
 
 	// Add to batch - batcher will use its own internal context
 	// Note: QueryBuilder context is deliberately ignored for batch operations
-	qb.manager.batcher.Add(NewQueryJob(queryForBatch))
+	err := qb.manager.batcher.Add(NewQueryJob(queryForBatch))
 
 	ReleaseQueryBuilder(qb)
-	return id, nil
+	return id, err
 }
 
 // Read executes a read operation on the reader connection pool and returns multiple rows.
