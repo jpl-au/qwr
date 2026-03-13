@@ -128,13 +128,11 @@ func TestEventBusConcurrentEmit(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 100 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 100 {
 				eb.Emit(Event{Type: EventJobQueued})
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -277,22 +275,18 @@ func TestEventBusConcurrentEmitAndClose(t *testing.T) {
 	var wg sync.WaitGroup
 	// Hammer Emit from multiple goroutines
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 1000 {
 				eb.Emit(Event{Type: EventJobQueued})
 			}
-		}()
+		})
 	}
 
 	// Close concurrently
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		time.Sleep(time.Millisecond)
 		eb.Close()
-	}()
+	})
 
 	wg.Wait()
 

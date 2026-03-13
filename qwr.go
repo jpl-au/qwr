@@ -134,10 +134,7 @@ func (m *Manager) handleRetryEvent(e Event) {
 	m.events.Emit(Event{Type: EventRetryScheduled, JobID: e.JobID, Attempt: jobErr.Query.retries + 1, NextRetry: jobErr.nextRetryAt})
 
 	// Schedule retry at the exact calculated time
-	delay := time.Until(jobErr.nextRetryAt)
-	if delay < 0 {
-		delay = 0
-	}
+	delay := max(time.Until(jobErr.nextRetryAt), 0)
 
 	// Don't schedule if shutdown has begun
 	if m.closed.Load() {

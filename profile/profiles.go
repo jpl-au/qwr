@@ -6,6 +6,7 @@ package profile
 import (
 	"database/sql"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 )
@@ -63,13 +64,13 @@ type Profile struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
-	Pragmas         map[string]interface{}
+	Pragmas         map[string]any
 }
 
 // New creates a new empty profile with initialized pragmas map
 func New() *Profile {
 	return &Profile{
-		Pragmas: make(map[string]interface{}),
+		Pragmas: make(map[string]any),
 	}
 }
 
@@ -137,11 +138,9 @@ func (p *Profile) Clone() *Profile {
 		MaxOpenConns:    p.MaxOpenConns,
 		MaxIdleConns:    p.MaxIdleConns,
 		ConnMaxLifetime: p.ConnMaxLifetime,
-		Pragmas:         make(map[string]interface{}, len(p.Pragmas)),
+		Pragmas:         make(map[string]any, len(p.Pragmas)),
 	}
-	for k, v := range p.Pragmas {
-		clone.Pragmas[k] = v
-	}
+	maps.Copy(clone.Pragmas, p.Pragmas)
 	return clone
 }
 
