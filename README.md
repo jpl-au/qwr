@@ -89,13 +89,28 @@ manager.Query("INSERT INTO users (name) VALUES (?)", "Diana").Batch()
 ```
 
 **Transactions**
-Multi-statement atomic operations.
+Multi-statement atomic operations with pre-declared statements.
 ```go
 tx := manager.Transaction().
     Add("INSERT INTO users (name) VALUES (?)", "Eve").
     Add("UPDATE users SET active = ? WHERE name = ?", true, "Eve")
 
-result, err := tx.Write() // or tx.Exec() for async
+result, err := tx.Write() // or tx.Exec() for queued
+```
+
+**Callback Transactions**
+For interleaved reads and writes within a single transaction. The callback receives a `*sql.Tx` — qwr manages begin, commit, and rollback.
+```go
+result, err := manager.TransactionFunc(func(tx *sql.Tx) (any, error) {
+    var maxPos int
+    tx.QueryRow("SELECT MAX(position) FROM items").Scan(&maxPos)
+
+    _, err := tx.Exec("INSERT INTO items (position) VALUES (?)", maxPos+1)
+    if err != nil {
+        return nil, err
+    }
+    return maxPos + 1, nil
+}).Exec() // or .Write() for direct execution
 ```
 
 ### Read Operations

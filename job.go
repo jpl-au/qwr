@@ -10,10 +10,11 @@ import (
 
 // Job represents a database job that can be executed
 type Job struct {
-	Type        JobType
-	Query       Query
-	Transaction Transaction
-	BatchJob    BatchJob
+	Type            JobType
+	Query           Query
+	Transaction     Transaction
+	BatchJob        BatchJob
+	TransactionFunc TransactionFunc
 }
 
 type JobType int
@@ -22,6 +23,7 @@ const (
 	JobTypeQuery JobType = iota
 	JobTypeTransaction
 	JobTypeBatch
+	JobTypeTransactionFunc
 )
 
 // ID returns the unique identifier for this job
@@ -33,6 +35,8 @@ func (j Job) ID() int64 {
 		return j.Transaction.ID()
 	case JobTypeBatch:
 		return j.BatchJob.ID()
+	case JobTypeTransactionFunc:
+		return j.TransactionFunc.ID()
 	default:
 		return 0
 	}
@@ -47,6 +51,8 @@ func (j Job) ExecuteWithContext(ctx context.Context, db *sql.DB) JobResult {
 		return j.Transaction.ExecuteWithContext(ctx, db)
 	case JobTypeBatch:
 		return j.BatchJob.ExecuteWithContext(ctx, db)
+	case JobTypeTransactionFunc:
+		return j.TransactionFunc.ExecuteWithContext(ctx, db)
 	default:
 		return JobResult{}
 	}
@@ -54,10 +60,11 @@ func (j Job) ExecuteWithContext(ctx context.Context, db *sql.DB) JobResult {
 
 // JobResult represents the outcome of a job execution
 type JobResult struct {
-	Type              ResultType
-	QueryResult       QueryResult
-	TransactionResult TransactionResult
-	BatchResult       BatchResult
+	Type                  ResultType
+	QueryResult           QueryResult
+	TransactionResult     TransactionResult
+	BatchResult           BatchResult
+	TransactionFuncResult TransactionFuncResult
 }
 
 type ResultType int
@@ -66,6 +73,7 @@ const (
 	ResultTypeQuery ResultType = iota
 	ResultTypeTransaction
 	ResultTypeBatch
+	ResultTypeTransactionFunc
 )
 
 // ID returns the ID of the job that produced this result
@@ -77,6 +85,8 @@ func (jr JobResult) ID() int64 {
 		return jr.TransactionResult.ID()
 	case ResultTypeBatch:
 		return jr.BatchResult.ID()
+	case ResultTypeTransactionFunc:
+		return jr.TransactionFuncResult.ID()
 	default:
 		return 0
 	}
@@ -91,6 +101,8 @@ func (jr JobResult) Error() error {
 		return jr.TransactionResult.Error()
 	case ResultTypeBatch:
 		return jr.BatchResult.Error()
+	case ResultTypeTransactionFunc:
+		return jr.TransactionFuncResult.Error()
 	default:
 		return nil
 	}
@@ -105,6 +117,8 @@ func (jr JobResult) Duration() time.Duration {
 		return jr.TransactionResult.Duration()
 	case ResultTypeBatch:
 		return jr.BatchResult.Duration()
+	case ResultTypeTransactionFunc:
+		return jr.TransactionFuncResult.Duration()
 	default:
 		return 0
 	}
@@ -145,10 +159,7 @@ func (je JobError) Age() time.Duration {
 func (je *JobError) CalculateNextRetry(baseDelay time.Duration) {
 	// Exponential backoff: baseDelay * 2^(retries)
 	// Cap shift amount to prevent integer overflow (max 2^30)
-	shift := je.Query.retries
-	if shift > 30 {
-		shift = 30
-	}
+	shift := min(je.Query.retries, 30)
 	delay := baseDelay * time.Duration(1<<shift)
 
 	// Add ±25% jitter to prevent synchronized retry storms
@@ -199,4 +210,14 @@ func NewTransactionResult(tr TransactionResult) JobResult {
 // NewBatchResult creates a JobResult from a BatchResult
 func NewBatchResult(br BatchResult) JobResult {
 	return JobResult{Type: ResultTypeBatch, BatchResult: br}
+}
+
+// NewTransactionFuncJob creates a Job from a TransactionFunc
+func NewTransactionFuncJob(tf TransactionFunc) Job {
+	return Job{Type: JobTypeTransactionFunc, TransactionFunc: tf}
+}
+
+// NewTransactionFuncResult creates a JobResult from a TransactionFuncResult
+func NewTransactionFuncResult(tfr TransactionFuncResult) JobResult {
+	return JobResult{Type: ResultTypeTransactionFunc, TransactionFuncResult: tfr}
 }

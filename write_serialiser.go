@@ -238,6 +238,9 @@ func (wp *WriteSerialiser) processJob(item workItem) {
 	case JobTypeTransaction:
 		result = item.job.Transaction.ExecuteWithContext(item.ctx, wp.db)
 
+	case JobTypeTransactionFunc:
+		result = item.job.TransactionFunc.ExecuteWithContext(item.ctx, wp.db)
+
 	default:
 		result = NewQueryResult(QueryResult{
 			id:  item.job.ID(),

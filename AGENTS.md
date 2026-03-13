@@ -93,6 +93,8 @@ Prefer `ReadClose()` over `Read()` — it prevents forgotten `rows.Close()` call
 
 ## Transactions
 
+**Declarative** — pre-built list of statements, no mid-transaction reads:
+
 ```go
 tx := manager.Transaction().
     Add("INSERT INTO users (name) VALUES (?)", "Alice").
@@ -106,6 +108,24 @@ result, err := tx.Exec()
 ```
 
 Use `AddPrepared()` instead of `Add()` for repeated SQL patterns within a transaction.
+
+**Callback** — full `*sql.Tx` access for interleaved reads and writes:
+
+```go
+result, err := manager.TransactionFunc(func(tx *sql.Tx) (any, error) {
+    var maxPos int
+    if err := tx.QueryRow("SELECT MAX(position) FROM items").Scan(&maxPos); err != nil {
+        return nil, err
+    }
+    _, err := tx.Exec("INSERT INTO items (position) VALUES (?)", maxPos+1)
+    return maxPos + 1, err
+}).Exec()
+
+// result.Value holds the returned value (type assert as needed)
+pos := result.Value.(int)
+```
+
+qwr manages `BeginTx`/`Commit`/`Rollback`. Return a non-nil error from the callback to trigger rollback. Both `Exec()` (queued) and `Write()` (direct) are supported.
 
 ## Common Mistakes
 
