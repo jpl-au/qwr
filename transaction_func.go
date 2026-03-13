@@ -113,18 +113,17 @@ func (tf *TransactionFunc) Write() (*TransactionFuncResult, error) {
 // ExecuteWithContext runs the callback within a transaction on the given db.
 // Used by the write serialiser to dispatch TransactionFunc jobs.
 func (tf *TransactionFunc) ExecuteWithContext(ctx context.Context, db *sql.DB) JobResult {
+	start := time.Now()
+	result := &TransactionFuncResult{id: tf.id}
+
+	// Apply transaction timeout when context is available.
 	if ctx != nil {
-		return tf.executeWithContext(ctx, db)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, tf.manager.options.TransactionTimeout)
+		defer cancel()
 	}
-	return tf.execute(db)
-}
 
-// execute runs the callback without context.
-func (tf *TransactionFunc) execute(db *sql.DB) JobResult {
-	start := time.Now()
-	result := &TransactionFuncResult{id: tf.id}
-
-	tx, err := db.Begin()
+	tx, err := tf.beginTx(ctx, db)
 	if err != nil {
 		result.err = err
 		result.duration = time.Since(start)
@@ -150,41 +149,13 @@ func (tf *TransactionFunc) execute(db *sql.DB) JobResult {
 	return NewTransactionFuncResult(*result)
 }
 
-// executeWithContext runs the callback with a timeout-bounded context.
-func (tf *TransactionFunc) executeWithContext(ctx context.Context, db *sql.DB) JobResult {
-	start := time.Now()
-	result := &TransactionFuncResult{id: tf.id}
-
-	txCtx, cancel := context.WithTimeout(ctx, tf.manager.options.TransactionTimeout)
-	defer cancel()
-
-	tx, err := db.BeginTx(txCtx, &sql.TxOptions{
-		Isolation: sql.LevelDefault,
-		ReadOnly:  false,
-	})
-	if err != nil {
-		result.err = err
-		result.duration = time.Since(start)
-		return NewTransactionFuncResult(*result)
+// beginTx starts a transaction. Uses BeginTx when context is available,
+// plain Begin otherwise.
+func (tf *TransactionFunc) beginTx(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	if ctx == nil {
+		return db.Begin()
 	}
-
-	val, err := tf.callFn(tx)
-	if err != nil {
-		tx.Rollback()
-		result.err = err
-		result.duration = time.Since(start)
-		return NewTransactionFuncResult(*result)
-	}
-
-	if err := tx.Commit(); err != nil {
-		result.err = err
-		result.duration = time.Since(start)
-		return NewTransactionFuncResult(*result)
-	}
-
-	result.Value = val
-	result.duration = time.Since(start)
-	return NewTransactionFuncResult(*result)
+	return db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 }
 
 // callFn invokes the user callback, converting any panic into an error.
