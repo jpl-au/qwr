@@ -1,3 +1,8 @@
+// query_bench_test.go benchmarks all QueryBuilder execution paths against
+// file-backed SQLite to measure real disk I/O costs. Covers direct writes,
+// queued writes, async/batch submission, and all read variants. Prepared
+// statement and context variants isolate the overhead of each feature.
+
 package qwr
 
 import (
@@ -6,107 +11,107 @@ import (
 	"testing"
 )
 
-// --- Write path benchmarks ---
+// Write benchmarks measure the cost of a single INSERT through each
+// execution path. The difference between Write (direct) and Execute
+// (queued) shows the serialiser channel overhead. Async and Batch
+// measure submission cost only — actual write happens asynchronously.
 
 func BenchmarkQueryWrite(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").Write()
 	}
 }
 
 func BenchmarkQueryWritePrepared(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").Prepared().Write()
 	}
 }
 
 func BenchmarkQueryWriteWithContext(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
 	ctx := context.Background()
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").WithContext(ctx).Write()
 	}
 }
 
 func BenchmarkQueryExecute(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").Execute()
 	}
 }
 
 func BenchmarkQueryExecutePrepared(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").Prepared().Execute()
 	}
 }
 
 func BenchmarkQueryExecuteWithContext(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
 	ctx := context.Background()
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").WithContext(ctx).Execute()
 	}
 }
 
+// Async measures submission cost only — the write is dispatched to the
+// worker and completes later. Errors surface via the error queue.
 func BenchmarkQueryAsync(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").Async()
 	}
 }
 
+// Batch measures the cost of appending to the batch collector. The actual
+// write is deferred until the batch flushes by size or timeout.
 func BenchmarkQueryBatch(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("INSERT INTO bench (name) VALUES (?)", "alice").Batch()
 	}
 }
 
-// --- Read path benchmarks ---
+// Read benchmarks measure query cost against a pre-seeded table.
+// The difference between plain and prepared variants shows the
+// parsing overhead that the statement cache eliminates.
 
 func BenchmarkQueryRead(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 	seedBenchRows(b, mgr, 100)
 
-	b.ResetTimer()
 	for b.Loop() {
 		rows, err := mgr.Query("SELECT id, name FROM bench").Read()
 		if err != nil {
@@ -117,12 +122,11 @@ func BenchmarkQueryRead(b *testing.B) {
 }
 
 func BenchmarkQueryReadPrepared(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 	seedBenchRows(b, mgr, 100)
 
-	b.ResetTimer()
 	for b.Loop() {
 		rows, err := mgr.Query("SELECT id, name FROM bench").Prepared().Read()
 		if err != nil {
@@ -133,13 +137,12 @@ func BenchmarkQueryReadPrepared(b *testing.B) {
 }
 
 func BenchmarkQueryReadWithContext(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 	seedBenchRows(b, mgr, 100)
 
 	ctx := context.Background()
-	b.ResetTimer()
 	for b.Loop() {
 		rows, err := mgr.Query("SELECT id, name FROM bench").WithContext(ctx).Read()
 		if err != nil {
@@ -149,13 +152,14 @@ func BenchmarkQueryReadWithContext(b *testing.B) {
 	}
 }
 
+// ReadClose includes row iteration cost — measures the full read cycle
+// that most application code actually performs.
 func BenchmarkQueryReadClose(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 	seedBenchRows(b, mgr, 100)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Query("SELECT id, name FROM bench").ReadClose(func(rows *sql.Rows) error {
 			for rows.Next() {
@@ -169,12 +173,11 @@ func BenchmarkQueryReadClose(b *testing.B) {
 }
 
 func BenchmarkQueryReadRow(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 	seedBenchRows(b, mgr, 10)
 
-	b.ResetTimer()
 	for b.Loop() {
 		row, err := mgr.Query("SELECT name FROM bench WHERE id = ?", 1).ReadRow()
 		if err != nil {
@@ -186,12 +189,11 @@ func BenchmarkQueryReadRow(b *testing.B) {
 }
 
 func BenchmarkQueryReadRowPrepared(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 	seedBenchRows(b, mgr, 10)
 
-	b.ResetTimer()
 	for b.Loop() {
 		row, err := mgr.Query("SELECT name FROM bench WHERE id = ?", 1).Prepared().ReadRow()
 		if err != nil {
@@ -202,7 +204,6 @@ func BenchmarkQueryReadRowPrepared(b *testing.B) {
 	}
 }
 
-// seedBenchRows inserts n rows into the bench table for read benchmarks.
 func seedBenchRows(b *testing.B, mgr *Manager, n int) {
 	b.Helper()
 	for i := range n {

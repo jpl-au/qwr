@@ -274,9 +274,9 @@ func (p *Profile) WithQueryOnly(enabled bool) *Profile {
 	return p
 }
 
-// Read profiles optimised for read operations
-
-// ReadLight provides basic read performance with low resource usage
+// ReadLight targets low-memory environments or applications with infrequent
+// reads. 5 connections and a 30MB cache keep the footprint small at the
+// cost of reduced concurrency under load.
 func ReadLight() *Profile {
 	return New().
 		WithMaxOpenConns(5).
@@ -294,7 +294,9 @@ func ReadLight() *Profile {
 		WithRecursiveTriggers(true)
 }
 
-// ReadBalanced provides good read performance suitable for most applications
+// ReadBalanced is the recommended default for most applications. 10
+// connections with a 75MB cache handles moderate concurrency without
+// excessive memory use.
 func ReadBalanced() *Profile {
 	return New().
 		WithMaxOpenConns(10).
@@ -312,7 +314,10 @@ func ReadBalanced() *Profile {
 		WithRecursiveTriggers(true)
 }
 
-// ReadHeavy maximises read throughput for high-concurrency scenarios
+// ReadHeavy targets high-concurrency workloads where many goroutines
+// read simultaneously. 25 connections and a 150MB cache reduce contention
+// at the cost of higher memory use. Only worthwhile when read concurrency
+// is the bottleneck.
 func ReadHeavy() *Profile {
 	return New().
 		WithMaxOpenConns(25).
@@ -330,9 +335,9 @@ func ReadHeavy() *Profile {
 		WithRecursiveTriggers(true)
 }
 
-// Write profiles optimised for write operations
-
-// WriteLight provides basic write performance with low resource usage
+// WriteLight targets low-memory environments or applications with
+// infrequent writes. Uses 4096 page size and incremental auto-vacuum,
+// trading write throughput for a smaller on-disk footprint.
 func WriteLight() *Profile {
 	return New().
 		WithMaxOpenConns(1). // SQLite single writer constraint
@@ -350,7 +355,10 @@ func WriteLight() *Profile {
 		WithRecursiveTriggers(true)
 }
 
-// WriteBalanced provides good write performance suitable for most applications
+// WriteBalanced is the recommended default for most applications. Uses
+// 8192 page size for better write throughput and disables auto-vacuum
+// to avoid write amplification. The larger page size is the primary
+// performance differentiator over WriteLight.
 func WriteBalanced() *Profile {
 	return New().
 		WithMaxOpenConns(1). // SQLite single writer constraint
@@ -368,7 +376,10 @@ func WriteBalanced() *Profile {
 		WithRecursiveTriggers(true)
 }
 
-// WriteHeavy maximises write throughput for high-volume write scenarios
+// WriteHeavy targets high-volume write workloads. Uses the same 8192
+// page size as Balanced but doubles the cache and mmap sizes, and
+// increases busy_timeout. The extra memory helps when the working set
+// exceeds Balanced's cache — otherwise performance is identical.
 func WriteHeavy() *Profile {
 	return New().
 		WithMaxOpenConns(1). // SQLite single writer constraint

@@ -1,17 +1,30 @@
+// transaction_bench_test.go benchmarks Transaction (declarative) and
+// TransactionFunc (callback) execution paths against file-backed SQLite.
+// Each benchmark inserts two rows within a transaction to measure the
+// real cost of begin/commit with disk I/O. Exec routes through the
+// serialised worker queue; Write bypasses it for direct execution.
+//
+// Shared benchmark helpers (benchMgr, setupBenchTable) live here because
+// this file was the first benchmark file in the package.
+
 package qwr
 
 import (
 	"context"
 	"database/sql"
+	"path/filepath"
 	"testing"
+
+	"github.com/jpl-au/qwr/profile"
 )
 
+// Declarative transaction benchmarks — pre-built statement list.
+
 func BenchmarkTransactionExec(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Transaction().
 			Add("INSERT INTO bench (name) VALUES (?)", "alice").
@@ -21,11 +34,10 @@ func BenchmarkTransactionExec(b *testing.B) {
 }
 
 func BenchmarkTransactionWrite(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Transaction().
 			Add("INSERT INTO bench (name) VALUES (?)", "alice").
@@ -35,12 +47,11 @@ func BenchmarkTransactionWrite(b *testing.B) {
 }
 
 func BenchmarkTransactionExecWithContext(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
 	ctx := context.Background()
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.Transaction().
 			WithContext(ctx).
@@ -50,12 +61,14 @@ func BenchmarkTransactionExecWithContext(b *testing.B) {
 	}
 }
 
+// Callback transaction benchmarks — caller receives *sql.Tx for
+// interleaved reads and writes within qwr's serialised writer.
+
 func BenchmarkTransactionFuncExec(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
 			tx.Exec("INSERT INTO bench (name) VALUES (?)", "alice")
@@ -66,11 +79,10 @@ func BenchmarkTransactionFuncExec(b *testing.B) {
 }
 
 func BenchmarkTransactionFuncWrite(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
 			tx.Exec("INSERT INTO bench (name) VALUES (?)", "alice")
@@ -81,12 +93,11 @@ func BenchmarkTransactionFuncWrite(b *testing.B) {
 }
 
 func BenchmarkTransactionFuncExecWithContext(b *testing.B) {
-	mgr := newBenchMgr(b)
+	mgr := benchMgr(b, nil, nil)
 	defer mgr.Close()
 	setupBenchTable(b, mgr)
 
 	ctx := context.Background()
-	b.ResetTimer()
 	for b.Loop() {
 		mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
 			tx.Exec("INSERT INTO bench (name) VALUES (?)", "alice")
@@ -96,9 +107,20 @@ func BenchmarkTransactionFuncExecWithContext(b *testing.B) {
 	}
 }
 
-func newBenchMgr(b *testing.B) *Manager {
+// benchMgr creates a file-backed manager for benchmarks. Pass nil for
+// either profile to use defaults. All benchmarks use real disk I/O to
+// measure actual SQLite write costs including WAL and fsync overhead.
+func benchMgr(b *testing.B, r *profile.Profile, w *profile.Profile) *Manager {
 	b.Helper()
-	mgr, err := New("file::memory:?cache=shared", DefaultOptions).Open()
+	path := filepath.Join(b.TempDir(), "bench.db")
+	builder := New(path)
+	if r != nil {
+		builder = builder.Reader(r)
+	}
+	if w != nil {
+		builder = builder.Writer(w)
+	}
+	mgr, err := builder.Open()
 	if err != nil {
 		b.Fatalf("failed to create manager: %v", err)
 	}
