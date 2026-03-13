@@ -84,10 +84,11 @@ func (c *StmtCache) Get(db *sql.DB, query string) (*sql.Stmt, error) {
 
 	c.events.Emit(Event{Type: EventCacheMiss, CacheQuery: query, CachePrepTime: prepDuration})
 
-	// Store in cache (cost of 1 per statement). Ristretto processes
-	// Set() asynchronously — a subsequent Get() may miss and prepare
-	// again, but that's cheaper than blocking here with Wait().
+	// Store in cache and wait for the entry to be available. Without
+	// Wait(), ristretto's async Set may not propagate before the next
+	// Get(), causing the same statement to be prepared twice.
 	c.cache.Set(query, stmt, 1)
+	c.cache.Wait()
 
 	return stmt, nil
 }
