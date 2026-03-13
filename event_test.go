@@ -303,8 +303,7 @@ func BenchmarkEventBusEmitZeroSubscribers(b *testing.B) {
 	defer eb.Close()
 	event := Event{Type: EventJobQueued}
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		eb.Emit(event)
 	}
 }
@@ -315,8 +314,7 @@ func BenchmarkEventBusEmitOneSubscriber(b *testing.B) {
 	eb.Subscribe(func(e Event) {})
 	event := Event{Type: EventJobQueued}
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		eb.Emit(event)
 	}
 }
@@ -327,8 +325,7 @@ func BenchmarkEventBusEmitFilteredSubscriber(b *testing.B) {
 	eb.SubscribeFiltered(func(e Event) {}, JobEvents())
 	event := Event{Type: EventCacheHit} // won't match filter
 
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		eb.Emit(event)
 	}
 }
