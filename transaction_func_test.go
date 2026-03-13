@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -148,24 +149,66 @@ func TestTransactionFuncWithContext(t *testing.T) {
 	}
 }
 
-func TestTransactionFuncPanic(t *testing.T) {
+func TestTransactionFuncPanicWrite(t *testing.T) {
 	mgr := newTestMgr(t, DefaultOptions)
 	defer mgr.Close()
 
 	setupTable(t, mgr)
 
-	// Panic inside the callback should be recovered, transaction rolled back,
-	// and the panic re-raised.
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic to propagate")
-		}
-	}()
-
-	mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
+	// Panic inside the callback is converted to an error.
+	// Transaction should be rolled back, row should not exist.
+	_, err := mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
 		tx.Exec("INSERT INTO users (name) VALUES (?)", "panic")
 		panic("boom")
 	}).Write()
+
+	if err == nil {
+		t.Fatal("expected error from panic")
+	}
+	if !strings.Contains(err.Error(), "panicked") {
+		t.Errorf("error = %q, want panic message", err)
+	}
+
+	// Row should not exist — transaction was rolled back.
+	row, _ := mgr.Query("SELECT COUNT(*) FROM users").ReadRow()
+	var count int
+	row.Scan(&count)
+	if count != 0 {
+		t.Errorf("got %d rows, want 0 (rollback expected)", count)
+	}
+}
+
+func TestTransactionFuncPanicExec(t *testing.T) {
+	mgr := newTestMgr(t, DefaultOptions)
+	defer mgr.Close()
+
+	setupTable(t, mgr)
+
+	// Panic during Exec (queued execution) must not kill the worker.
+	_, err := mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
+		tx.Exec("INSERT INTO users (name) VALUES (?)", "panic")
+		panic("boom")
+	}).Exec()
+
+	if err == nil {
+		t.Fatal("expected error from panic")
+	}
+	if !strings.Contains(err.Error(), "panicked") {
+		t.Errorf("error = %q, want panic message", err)
+	}
+
+	// The worker must still be alive — verify by executing another write.
+	_, err = mgr.Query("INSERT INTO users (name) VALUES (?)", "after-panic").Execute()
+	if err != nil {
+		t.Fatalf("worker died: subsequent Execute failed: %v", err)
+	}
+
+	row, _ := mgr.Query("SELECT COUNT(*) FROM users WHERE name = ?", "after-panic").ReadRow()
+	var count int
+	row.Scan(&count)
+	if count != 1 {
+		t.Errorf("got %d rows, want 1 (worker should still be alive)", count)
+	}
 }
 
 func TestTransactionFuncResult(t *testing.T) {

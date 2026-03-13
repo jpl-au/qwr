@@ -10,6 +10,7 @@ package qwr
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -130,14 +131,7 @@ func (tf *TransactionFunc) execute(db *sql.DB) JobResult {
 		return NewTransactionFuncResult(*result)
 	}
 
-	defer func() {
-		if p := recover(); p != nil {
-			tx.Rollback()
-			panic(p)
-		}
-	}()
-
-	val, err := tf.fn(tx)
+	val, err := tf.callFn(tx)
 	if err != nil {
 		tx.Rollback()
 		result.err = err
@@ -174,14 +168,7 @@ func (tf *TransactionFunc) executeWithContext(ctx context.Context, db *sql.DB) J
 		return NewTransactionFuncResult(*result)
 	}
 
-	defer func() {
-		if p := recover(); p != nil {
-			tx.Rollback()
-			panic(p)
-		}
-	}()
-
-	val, err := tf.fn(tx)
+	val, err := tf.callFn(tx)
 	if err != nil {
 		tx.Rollback()
 		result.err = err
@@ -198,4 +185,17 @@ func (tf *TransactionFunc) executeWithContext(ctx context.Context, db *sql.DB) J
 	result.Value = val
 	result.duration = time.Since(start)
 	return NewTransactionFuncResult(*result)
+}
+
+// callFn invokes the user callback, converting any panic into an error.
+// This protects the write serialiser worker from being killed by a
+// misbehaving callback.
+func (tf *TransactionFunc) callFn(tx *sql.Tx) (val any, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			tx.Rollback()
+			err = fmt.Errorf("transaction callback panicked: %v", p)
+		}
+	}()
+	return tf.fn(tx)
 }
