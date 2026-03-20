@@ -40,7 +40,7 @@ type subscription struct {
 //
 // Delivery guarantee: each event is delivered exactly once to every subscriber
 // whose filter matches at the time of the Emit call. Events are never queued,
-// retried, or persisted — if no subscribers are registered, the event is
+// retried, or persisted - if no subscribers are registered, the event is
 // silently discarded. After Close, all Emit calls are no-ops.
 //
 // Concurrency model:

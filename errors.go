@@ -175,7 +175,7 @@ func (qe *QWRError) WithContext(key string, value any) *QWRError {
 
 // sqliteErrorCode is satisfied by SQLite driver error types that expose the
 // underlying result code (e.g. modernc.org/sqlite.Error, mattn/go-sqlite3.Error).
-// This keeps classification driver-agnostic — no driver imports needed.
+// This keeps classification driver-agnostic - no driver imports needed.
 type sqliteErrorCode interface {
 	Code() int
 }
@@ -183,20 +183,20 @@ type sqliteErrorCode interface {
 // SQLite primary result codes used for error classification.
 // These are stable across all SQLite versions and drivers.
 const (
-	sqliteError      = 1  // SQLITE_ERROR — generic error
-	sqlitePerm       = 3  // SQLITE_PERM — access permission denied
-	sqliteBusy       = 5  // SQLITE_BUSY — database file is locked
-	sqliteLocked     = 6  // SQLITE_LOCKED — table in the database is locked
-	sqliteNoMem      = 7  // SQLITE_NOMEM — malloc failed
-	sqliteReadOnly   = 8  // SQLITE_READONLY — attempt to write a readonly database
-	sqliteInterrupt  = 9  // SQLITE_INTERRUPT — operation terminated by sqlite3_interrupt
-	sqliteIOErr      = 10 // SQLITE_IOERR — disk I/O error
-	sqliteCorrupt    = 11 // SQLITE_CORRUPT — database disk image is malformed
-	sqliteFull       = 13 // SQLITE_FULL — database is full
-	sqliteCantOpen   = 14 // SQLITE_CANTOPEN — unable to open the database file
-	sqliteConstraint = 19 // SQLITE_CONSTRAINT — constraint violation
-	sqliteAuth       = 23 // SQLITE_AUTH — authorisation denied
-	sqliteNotADB     = 26 // SQLITE_NOTADB — not a database file
+	sqliteError      = 1  // SQLITE_ERROR - generic error
+	sqlitePerm       = 3  // SQLITE_PERM - access permission denied
+	sqliteBusy       = 5  // SQLITE_BUSY - database file is locked
+	sqliteLocked     = 6  // SQLITE_LOCKED - table in the database is locked
+	sqliteNoMem      = 7  // SQLITE_NOMEM - malloc failed
+	sqliteReadOnly   = 8  // SQLITE_READONLY - attempt to write a readonly database
+	sqliteInterrupt  = 9  // SQLITE_INTERRUPT - operation terminated by sqlite3_interrupt
+	sqliteIOErr      = 10 // SQLITE_IOERR - disk I/O error
+	sqliteCorrupt    = 11 // SQLITE_CORRUPT - database disk image is malformed
+	sqliteFull       = 13 // SQLITE_FULL - database is full
+	sqliteCantOpen   = 14 // SQLITE_CANTOPEN - unable to open the database file
+	sqliteConstraint = 19 // SQLITE_CONSTRAINT - constraint violation
+	sqliteAuth       = 23 // SQLITE_AUTH - authorisation denied
+	sqliteNotADB     = 26 // SQLITE_NOTADB - not a database file
 )
 
 // ClassifyError provides enhanced error classification with detailed categorisation.
@@ -208,7 +208,7 @@ func ClassifyError(err error, operation string) *QWRError {
 		return NewQWRError(nil, ErrorCategoryInternal, RetryStrategyNone, operation)
 	}
 
-	// Check for known internal QWR errors first — these are never from SQLite
+	// Check for known internal QWR errors first - these are never from SQLite
 	for _, qwrErr := range []error{
 		ErrReaderDisabled, ErrWriterDisabled, ErrWorkerNotRunning,
 		ErrErrorQueueDisabled,

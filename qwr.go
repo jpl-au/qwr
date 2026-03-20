@@ -198,7 +198,7 @@ func (m *Manager) cancelRetryTimers() {
 }
 
 // Close closes all database connections and stops the worker pool.
-// Safe to call multiple times — subsequent calls return the same result.
+// Safe to call multiple times - subsequent calls return the same result.
 func (m *Manager) Close() error {
 	m.closeOnce.Do(func() {
 		m.closeErr = m.doClose()

@@ -14,7 +14,7 @@ import (
 // Write benchmarks measure the cost of a single INSERT through each
 // execution path. The difference between Write (direct) and Execute
 // (queued) shows the serialiser channel overhead. Async and Batch
-// measure submission cost only — actual write happens asynchronously.
+// measure submission cost only - actual write happens asynchronously.
 
 func BenchmarkQueryWrite(b *testing.B) {
 	mgr := benchMgr(b, nil, nil)
@@ -78,7 +78,7 @@ func BenchmarkQueryExecuteWithContext(b *testing.B) {
 	}
 }
 
-// Async measures submission cost only — the write is dispatched to the
+// Async measures submission cost only - the write is dispatched to the
 // worker and completes later. Errors surface via the error queue.
 func BenchmarkQueryAsync(b *testing.B) {
 	mgr := benchMgr(b, nil, nil)
@@ -152,7 +152,7 @@ func BenchmarkQueryReadWithContext(b *testing.B) {
 	}
 }
 
-// ReadClose includes row iteration cost — measures the full read cycle
+// ReadClose includes row iteration cost - measures the full read cycle
 // that most application code actually performs.
 func BenchmarkQueryReadClose(b *testing.B) {
 	mgr := benchMgr(b, nil, nil)

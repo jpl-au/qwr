@@ -76,7 +76,7 @@ func TestCombineInsertGroup(t *testing.T) {
 			{SQL: "INSERT INTO t (name) VALUES ('hello (world)')", Args: []any{}},
 		}
 		_, _, ok := bc.combineInsertGroup(queries)
-		// 0 args but pattern contains no ?, so 0 == 0 — this may actually combine.
+		// 0 args but pattern contains no ?, so 0 == 0 - this may actually combine.
 		// The key check is that it doesn't panic or produce corrupt SQL.
 		_ = ok // outcome is acceptable either way
 	})
@@ -89,7 +89,7 @@ func TestCombineInsertGroup(t *testing.T) {
 			{SQL: "INSERT INTO t (name) VALUES ('what?')", Args: []any{}},
 		}
 		_, _, ok := bc.combineInsertGroup(queries)
-		// 0 args but pattern has 1 '?' — validation should reject.
+		// 0 args but pattern has 1 '?' - validation should reject.
 		if ok {
 			t.Error("expected combine to fail: literal '?' in string should cause placeholder mismatch")
 		}
@@ -104,7 +104,7 @@ func TestCombineInsertGroup(t *testing.T) {
 		}
 		sql, args, ok := bc.combineInsertGroup(queries)
 		if !ok {
-			t.Fatal("expected combine to succeed — LastIndex should find the real VALUES")
+			t.Fatal("expected combine to succeed - LastIndex should find the real VALUES")
 		}
 		if len(args) != 2 {
 			t.Errorf("got %d args, want 2", len(args))
@@ -183,10 +183,10 @@ func TestCombineInsertGroup(t *testing.T) {
 			{SQL: "INSERT INTO t (a, b) VALUES (?, 'x(y)z')", Args: []any{2}},
 		}
 		_, _, ok := bc.combineInsertGroup(queries)
-		// Pattern is "(?, 'x(y)z')" which has 1 '?', args has 1 — should combine.
+		// Pattern is "(?, 'x(y)z')" which has 1 '?', args has 1 - should combine.
 		// The nested parens in the string literal don't affect placeholder counting.
 		if !ok {
-			t.Log("combine rejected — acceptable if placeholder validation is conservative")
+			t.Log("combine rejected - acceptable if placeholder validation is conservative")
 		}
 	})
 }

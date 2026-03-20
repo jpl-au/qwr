@@ -43,7 +43,7 @@ type Options struct {
 
 	// InlineInserts enables combining of identically-structured INSERT
 	// statements within a batch into a single multi-value INSERT. This
-	// reduces round-trips but relies on simple string parsing — it will
+	// reduces round-trips but relies on simple string parsing - it will
 	// produce incorrect results for INSERT...SELECT or VALUES clauses
 	// containing parentheses in string literals.
 	//
@@ -208,7 +208,7 @@ func (o *Options) SetDefaults() {
 
 // DefaultOptions provides sensible defaults suitable for most applications.
 // WorkerQueueDepth is set conservatively at 1000 (not 50000) to avoid
-// excessive memory use by default — raise it for high-throughput workloads.
+// excessive memory use by default - raise it for high-throughput workloads.
 var DefaultOptions = Options{
 	WorkerQueueDepth:   1000,
 	EnableReader:       true,

@@ -18,7 +18,7 @@ import (
 	"github.com/jpl-au/qwr/profile"
 )
 
-// Declarative transaction benchmarks — pre-built statement list.
+// Declarative transaction benchmarks - pre-built statement list.
 
 func BenchmarkTransactionExec(b *testing.B) {
 	mgr := benchMgr(b, nil, nil)
@@ -61,7 +61,7 @@ func BenchmarkTransactionExecWithContext(b *testing.B) {
 	}
 }
 
-// Callback transaction benchmarks — caller receives *sql.Tx for
+// Callback transaction benchmarks - caller receives *sql.Tx for
 // interleaved reads and writes within qwr's serialised writer.
 
 func BenchmarkTransactionFuncExec(b *testing.B) {

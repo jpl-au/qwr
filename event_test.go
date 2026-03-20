@@ -202,7 +202,7 @@ func TestEventBusPanicRecovery(t *testing.T) {
 		called = true
 	})
 
-	// Emit should not panic — the panicking handler is recovered
+	// Emit should not panic - the panicking handler is recovered
 	eb.Emit(Event{Type: EventJobQueued})
 
 	if !called {
@@ -217,7 +217,7 @@ func TestEventBusSubscribeFromHandler(t *testing.T) {
 	var dynamicCount int
 	eb.Subscribe(func(e Event) {
 		if e.Type == EventManagerOpened {
-			// Subscribe from within a handler — should not deadlock or corrupt
+			// Subscribe from within a handler - should not deadlock or corrupt
 			eb.Subscribe(func(e Event) {
 				dynamicCount++
 			})
@@ -243,7 +243,7 @@ func TestEventBusUnsubscribeFromHandler(t *testing.T) {
 	var subID uint64
 	subID = eb.Subscribe(func(e Event) {
 		count++
-		// Unsubscribe self after first event — should not deadlock or corrupt
+		// Unsubscribe self after first event - should not deadlock or corrupt
 		eb.Unsubscribe(subID)
 	})
 

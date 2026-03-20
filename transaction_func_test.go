@@ -59,7 +59,7 @@ func TestTransactionFuncRollback(t *testing.T) {
 		t.Fatalf("err = %v, want sentinel", err)
 	}
 
-	// Row should not exist — transaction was rolled back.
+	// Row should not exist - transaction was rolled back.
 	row, _ := mgr.Query("SELECT COUNT(*) FROM users").ReadRow()
 	var count int
 	row.Scan(&count)
@@ -115,7 +115,7 @@ func TestTransactionFuncWrite(t *testing.T) {
 
 	setupTable(t, mgr)
 
-	// Write() bypasses the queue — same callback, direct execution.
+	// Write() bypasses the queue - same callback, direct execution.
 	result, err := mgr.TransactionFunc(func(tx *sql.Tx) (any, error) {
 		_, err := tx.Exec("INSERT INTO users (name) VALUES (?)", "direct")
 		return "ok", err
@@ -169,7 +169,7 @@ func TestTransactionFuncPanicWrite(t *testing.T) {
 		t.Errorf("error = %q, want panic message", err)
 	}
 
-	// Row should not exist — transaction was rolled back.
+	// Row should not exist - transaction was rolled back.
 	row, _ := mgr.Query("SELECT COUNT(*) FROM users").ReadRow()
 	var count int
 	row.Scan(&count)
@@ -197,7 +197,7 @@ func TestTransactionFuncPanicExec(t *testing.T) {
 		t.Errorf("error = %q, want panic message", err)
 	}
 
-	// The worker must still be alive — verify by executing another write.
+	// The worker must still be alive - verify by executing another write.
 	_, err = mgr.Query("INSERT INTO users (name) VALUES (?)", "after-panic").Execute()
 	if err != nil {
 		t.Fatalf("worker died: subsequent Execute failed: %v", err)

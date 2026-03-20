@@ -99,7 +99,7 @@ result, err := tx.Write() // or tx.Exec() for queued
 ```
 
 **Callback Transactions**
-For interleaved reads and writes within a single transaction. The callback receives a `*sql.Tx` — qwr manages begin, commit, and rollback.
+For interleaved reads and writes within a single transaction. The callback receives a `*sql.Tx` - qwr manages begin, commit, and rollback.
 ```go
 result, err := manager.TransactionFunc(func(tx *sql.Tx) (any, error) {
     var maxPos int
@@ -573,7 +573,7 @@ qwr was inspired by numerous articles that describe using SQLite3 in production 
 **Author**: Expensify Engineering
 **URL**: https://use.expensify.com/blog/scaling-sqlite-to-4m-qps-on-a-single-server
 
-### Your Database is Your Prison — Here's How Expensify Broke Free
+### Your Database is Your Prison - Here's How Expensify Broke Free
 **Author**: First Round Review
 **URL**: https://review.firstround.com/your-database-is-your-prison-heres-how-expensify-broke-free/
 

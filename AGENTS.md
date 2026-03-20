@@ -42,16 +42,16 @@ There are four write methods. Pick the right one:
 | `Batch()` | Yes | No | Submission only | High-volume inserts where latency can be deferred |
 
 ```go
-// Direct write — bypasses queue, immediate result
+// Direct write - bypasses queue, immediate result
 result, err := manager.Query("INSERT INTO t (a) VALUES (?)", 1).Write()
 
-// Queued synchronous — serialised, blocks until done
+// Queued synchronous - serialised, blocks until done
 result, err := manager.Query("INSERT INTO t (a) VALUES (?)", 1).Execute()
 
-// Async — returns job ID, errors go to error queue
+// Async - returns job ID, errors go to error queue
 jobID, err := manager.Query("INSERT INTO t (a) VALUES (?)", 1).Async()
 
-// Batch — collected and flushed by size or timeout
+// Batch - collected and flushed by size or timeout
 jobID, err := manager.Query("INSERT INTO t (a) VALUES (?)", 1).Batch()
 ```
 
@@ -60,7 +60,7 @@ jobID, err := manager.Query("INSERT INTO t (a) VALUES (?)", 1).Batch()
 ## Reading Data
 
 ```go
-// Multiple rows — caller MUST close
+// Multiple rows - caller MUST close
 rows, err := manager.Query("SELECT id, name FROM users WHERE active = ?", true).Read()
 if err != nil {
     return err
@@ -89,11 +89,11 @@ if err := row.Scan(&name); err != nil {
 }
 ```
 
-Prefer `ReadClose()` over `Read()` — it prevents forgotten `rows.Close()` calls.
+Prefer `ReadClose()` over `Read()` - it prevents forgotten `rows.Close()` calls.
 
 ## Transactions
 
-**Declarative** — pre-built list of statements, no mid-transaction reads:
+**Declarative** - pre-built list of statements, no mid-transaction reads:
 
 ```go
 tx := manager.Transaction().
@@ -109,7 +109,7 @@ result, err := tx.Exec()
 
 Use `AddPrepared()` instead of `Add()` for repeated SQL patterns within a transaction.
 
-**Callback** — full `*sql.Tx` access for interleaved reads and writes:
+**Callback** - full `*sql.Tx` access for interleaved reads and writes:
 
 ```go
 result, err := manager.TransactionFunc(func(tx *sql.Tx) (any, error) {
@@ -135,7 +135,7 @@ qwr manages `BeginTx`/`Commit`/`Rollback`. Return a non-nil error from the callb
 // WRONG
 q := manager.Query("INSERT INTO t (a) VALUES (?)", 1)
 q.Write()
-q.Write() // undefined — builder has been released
+q.Write() // undefined - builder has been released
 
 // CORRECT
 manager.Query("INSERT INTO t (a) VALUES (?)", 1).Write()
@@ -157,7 +157,7 @@ manager.Query("INSERT INTO t (name) VALUES (?)", name).Write()
 ```go
 jobID, err := manager.Query("INSERT INTO t (a) VALUES (?)", 1).Async()
 if err != nil {
-    // Submission failed — query was never queued
+    // Submission failed - query was never queued
     return err
 }
 // Execution errors must be checked separately
@@ -199,7 +199,7 @@ Pick based on workload:
 
 ## Observing Events
 
-Subscribe to events for logging or metrics. Keep handlers fast — they run synchronously on the worker goroutine.
+Subscribe to events for logging or metrics. Keep handlers fast - they run synchronously on the worker goroutine.
 
 ```go
 manager.SubscribeFiltered(func(e qwr.Event) {

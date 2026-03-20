@@ -231,7 +231,7 @@ func TestStructuredLogger(t *testing.T) {
 
 // TestQueueDepthMonitoring shows how to track queue depth over time using
 // EventJobQueued and EventJobCompleted. This is useful for detecting
-// backpressure — if queued grows faster than completed, the worker can't
+// backpressure - if queued grows faster than completed, the worker can't
 // keep up with the write rate.
 func TestQueueDepthMonitoring(t *testing.T) {
 	mgr := newTestMgr(t, Options{})

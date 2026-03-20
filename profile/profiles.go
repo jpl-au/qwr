@@ -379,7 +379,7 @@ func WriteBalanced() *Profile {
 // WriteHeavy targets high-volume write workloads. Uses the same 8192
 // page size as Balanced but doubles the cache and mmap sizes, and
 // increases busy_timeout. The extra memory helps when the working set
-// exceeds Balanced's cache — otherwise performance is identical.
+// exceeds Balanced's cache - otherwise performance is identical.
 func WriteHeavy() *Profile {
 	return New().
 		WithMaxOpenConns(1). // SQLite single writer constraint

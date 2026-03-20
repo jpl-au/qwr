@@ -34,7 +34,7 @@ func NewStmtCache(events *EventBus, options Options) (*StmtCache, error) {
 	// Create ristretto cache with eviction and rejection callbacks.
 	// OnReject is critical: when TinyLFU rejects a Set(), the statement
 	// never enters the cache, so the eviction callback never fires.
-	// Without OnReject, rejected statements leak — database/sql does not
+	// Without OnReject, rejected statements leak - database/sql does not
 	// set a GC finaliser on *sql.Stmt.
 	c, err := ristretto.NewCache(&ristretto.Config{
 		NumCounters: int64(maxSize * 10), // 10x max size for frequency tracking
