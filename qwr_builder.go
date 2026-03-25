@@ -343,6 +343,11 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 			}
 		}
 
+		// SQLite only supports one concurrent writer per database file.
+		// The write serialiser depends on this - enforce it regardless
+		// of what the profile requests.
+		mb.writer.SetMaxOpenConns(1)
+
 		// Initialise writer statement cache
 		mb.writeStmtCache, err = NewStmtCache(mb.events, mb.options)
 		if err != nil {
