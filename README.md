@@ -74,7 +74,7 @@ jobID, err := manager.Query("INSERT INTO users (name) VALUES (?)", "Bob").Async(
 Note: Async operations that fail are automatically added to the error queue. Since there's no immediate error return, you must check the error queue to detect failures:
 
 ```go
-if jobErr, found := manager.GetErrorByID(jobID); found {
+if jobErr, found := manager.ErrorByID(jobID); found {
     log.Printf("Async job %d failed: %v", jobID, jobErr.Error())
 }
 ```
@@ -298,8 +298,13 @@ manager.RunCheckpoint(checkpoint.Full, "analytics")
 manager.RunVacuum("analytics")
 ```
 
-### Limitations
+### Important Notes
 
+- **Always use schema-qualified names**: Use `analytics.events`, not just `events`, for attached database tables. Unqualified names resolve to the main database.
+- **No bare `:memory:`**: Bare `:memory:` paths are rejected because each pooled connection would get its own isolated in-memory database. Use `file::memory:?cache=shared` for a shared in-memory attached database.
+- **Relative paths need a file-backed main database**: Relative attachment paths are resolved against the main database's directory. If the main database is `:memory:`, relative paths are rejected.
+- **Prepared statement timing**: Do not use `.Prepared()` for schema-qualified queries before the schema is attached. The preparation will fail on every call until the schema exists.
+- **Parallel writes**: Attached databases share a single serialised writer, which is correct for cross-database transactions. For parallel writes to independent databases, use separate `Manager` instances instead of `ATTACH`.
 - **Not supported with `NewSQL`**: Attach requires qwr-managed connections. When using `NewSQL()`, manage `ATTACH DATABASE` statements on your own connections.
 - **Reserved aliases**: `main` and `temp` are reserved by SQLite and cannot be used as attachment aliases.
 - **SQLite limit**: SQLite allows up to 10 attached databases by default (compile-time configurable up to 125).
@@ -434,10 +439,10 @@ When auto-retry is enabled, each retriable failure schedules its own retry using
 ### Error Queue Management
 ```go
 // Get all errors
-errors := manager.GetErrors()
+errors := manager.Errors()
 
 // Get specific error with enhanced information
-if jobErr, found := manager.GetErrorByID(jobID); found {
+if jobErr, found := manager.ErrorByID(jobID); found {
     fmt.Printf("Job %d failed: %v\n", jobID, jobErr.Error())
     
     // Access structured error information

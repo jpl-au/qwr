@@ -75,6 +75,22 @@
 //	// Write to attached database
 //	manager.Query("INSERT INTO analytics.events (action) VALUES (?)", "login").Execute()
 //
+// Always use schema-qualified table names for attached databases
+// (e.g. analytics.events, not just events). Unqualified names resolve to
+// the main database.
+//
+// Bare :memory: paths are rejected because each pooled connection would get
+// its own isolated in-memory database. Use file::memory:?cache=shared for a
+// shared in-memory attached database.
+//
+// Do not use [Query.Prepared] for schema-qualified queries before the schema
+// is attached - the preparation will fail on every call until the schema exists.
+//
+// For parallel writes to independent databases, use separate [Manager]
+// instances rather than ATTACH. Attached databases share a single serialised
+// writer, which is correct for cross-database transactions but does not offer
+// write parallelism.
+//
 // Attach is not supported with [NewSQL] because qwr cannot control connection
 // creation for user-provided database handles.
 //
