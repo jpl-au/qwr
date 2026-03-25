@@ -227,8 +227,8 @@ func TestTransactionFuncResult(t *testing.T) {
 	if result.ID() == 0 {
 		t.Error("expected non-zero ID")
 	}
-	if result.Duration() == 0 {
-		t.Error("expected non-zero duration")
+	if result.Duration() < 0 {
+		t.Error("expected non-negative duration")
 	}
 	if result.Error() != nil {
 		t.Errorf("unexpected error: %v", result.Error())

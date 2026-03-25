@@ -1,6 +1,14 @@
-// Package profiles provides pre-configured database profiles for different workload types.
+// Package profile provides pre-configured database profiles for different workload types.
 // Each profile optimises SQLite settings for specific use cases like read-heavy operations,
 // write-intensive workloads, or mixed scenarios.
+//
+// Pre-configured profiles:
+//
+//   - [ReadLight], [ReadBalanced], [ReadHeavy] for reader connection pools
+//   - [WriteLight], [WriteBalanced], [WriteHeavy] for the serialised writer
+//   - [Attached] for per-schema PRAGMAs on attached databases
+//
+// Use [New] to build a custom profile from scratch.
 package profile
 
 import (

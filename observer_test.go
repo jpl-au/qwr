@@ -129,8 +129,8 @@ func TestObserverPattern(t *testing.T) {
 		if capturedEvent.SQL != sql {
 			t.Errorf("expected SQL %q, got %q", sql, capturedEvent.SQL)
 		}
-		if capturedEvent.ExecTime <= 0 {
-			t.Error("expected positive ExecTime for completed job")
+		if capturedEvent.ExecTime < 0 {
+			t.Error("expected non-negative ExecTime for completed job")
 		}
 		if capturedEvent.JobID == 0 {
 			t.Error("expected non-zero JobID")

@@ -205,6 +205,17 @@ Database profiles configure connection pools and SQLite PRAGMA settings for diff
 - `profile.WriteBalanced()` - Most applications (100MB cache, 8KB pages)
 - `profile.WriteHeavy()` - High volume (200MB cache, 8KB pages)
 
+### Attached Database Profiles
+Use `profile.Attached()` to configure per-schema PRAGMAs for attached databases. Pool settings (MaxOpenConns, etc.) are ignored since attached databases share the main connection pool.
+
+```go
+manager, err := qwr.New("main.db").
+    Attach("analytics", "analytics.db", profile.Attached().
+        WithJournalMode(profile.JournalWal).
+        WithCacheSize(-30720)).
+    Open()
+```
+
 ### Custom Profiles
 ```go
 customProfile := profile.New().
@@ -219,6 +230,79 @@ manager, err := qwr.New("test.db").
     Writer(profile.WriteBalanced()).
     Open()
 ```
+
+## Attached Databases
+
+qwr supports SQLite's `ATTACH DATABASE` for working with multiple database files through a single manager. Attached databases share the main connection pool and write serialiser, enabling cross-database queries and atomic transactions.
+
+### Builder-Level Attach
+
+Attach databases at construction time. An optional profile configures per-schema PRAGMAs for the attached database (pool settings are ignored since attached databases share the main pool).
+
+```go
+manager, err := qwr.New("main.db").
+    Reader(profile.ReadBalanced()).
+    Writer(profile.WriteBalanced()).
+    Attach("analytics", "analytics.db", profile.Attached().
+        WithJournalMode(profile.JournalWal).
+        WithCacheSize(-30720)).
+    Attach("cache", "cache.db").
+    Open()
+```
+
+### Runtime Attach
+
+Attach databases after the manager is opened. The writer gets immediate access. New reader connections pick up the attachment as the pool recycles. Call `ResetReaderPool()` for immediate reader access.
+
+```go
+err := manager.Attach("logs", "logs.db")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Optional: force all reader connections to see the new attachment immediately
+manager.ResetReaderPool()
+```
+
+### Cross-Database Queries
+
+Reference attached databases using schema-qualified table names:
+
+```go
+// Write to an attached database
+manager.Query("INSERT INTO analytics.events (action) VALUES (?)", "login").Execute()
+
+// Cross-database join
+rows, err := manager.Query(`
+    SELECT u.name, e.action
+    FROM users u
+    JOIN analytics.events e ON u.id = e.user_id
+`).Read()
+
+// Cross-database transaction (atomic across both databases)
+manager.Transaction().
+    Add("INSERT INTO audit.log (action) VALUES (?)", "transfer").
+    Add("UPDATE analytics.counters SET total = total + 1").
+    Write()
+```
+
+### Per-Schema Maintenance
+
+Vacuum and checkpoint operations accept an optional schema parameter:
+
+```go
+// Checkpoint an attached database
+manager.RunCheckpoint(checkpoint.Full, "analytics")
+
+// Vacuum an attached database
+manager.RunVacuum("analytics")
+```
+
+### Limitations
+
+- **Not supported with `NewSQL`**: Attach requires qwr-managed connections. When using `NewSQL()`, manage `ATTACH DATABASE` statements on your own connections.
+- **Reserved aliases**: `main` and `temp` are reserved by SQLite and cannot be used as attachment aliases.
+- **SQLite limit**: SQLite allows up to 10 attached databases by default (compile-time configurable up to 125).
 
 ## Observing Events
 
@@ -461,11 +545,17 @@ manager.ResetCaches()
 // Full vacuum (rebuilds entire database)
 err := manager.RunVacuum()
 
+// Vacuum an attached database
+err := manager.RunVacuum("analytics")
+
 // Incremental vacuum (reclaims some space)
 err := manager.RunIncrementalVacuum(1000) // 1000 pages
 
 // Manual WAL checkpoint
 err := manager.RunCheckpoint(checkpoint.Passive)
+
+// Checkpoint an attached database
+err := manager.RunCheckpoint(checkpoint.Full, "analytics")
 
 // Online backup (Default tries API first, falls back to Vacuum)
 err := manager.Backup("/path/to/backup.db", backup.Default)
@@ -561,7 +651,9 @@ func main() {
 ```
 The Manager takes full ownership of your database connections. Call `Manager.Close()` to close both reader and writer connections. Use `WithErrorDB()` to enable persistent error logging for async operations.
 
-Profiles can still be applied to your connections (profiles are just specified SQLite PRAGMAS).
+Profiles can still be applied to your connections (profiles are just specified SQLite PRAGMAs).
+
+**Note:** `Attach()` is not supported with `NewSQL()`. Since qwr does not control connection creation for user-provided handles, it cannot guarantee ATTACH statements run on every pooled connection. Manage `ATTACH DATABASE` statements on your own connections before passing them to `NewSQL()`.
 
 qwr was inspired by numerous articles that describe using SQLite3 in production systems.
 

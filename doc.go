@@ -46,6 +46,38 @@
 //	}
 //	defer rows.Close()
 //
+// # Attached Databases
+//
+// qwr supports SQLite's ATTACH DATABASE for working with multiple database
+// files through a single manager. Attached databases share the main connection
+// pool and write serialiser, enabling cross-database queries and atomic
+// transactions across databases.
+//
+// Attach databases at construction time via the builder:
+//
+//	manager, err := qwr.New("main.db").
+//		Reader(profile.ReadBalanced()).
+//		Writer(profile.WriteBalanced()).
+//		Attach("analytics", "analytics.db", profile.Attached().
+//			WithJournalMode(profile.JournalWal)).
+//		Open()
+//
+// Or at runtime via the manager:
+//
+//	manager.Attach("logs", "logs.db")
+//	manager.ResetReaderPool() // force immediate reader access
+//
+// Queries reference attached databases using the schema-qualified syntax:
+//
+//	// Cross-database query
+//	rows, _ := manager.Query("SELECT u.name FROM users u JOIN analytics.events e ON ...").Read()
+//
+//	// Write to attached database
+//	manager.Query("INSERT INTO analytics.events (action) VALUES (?)", "login").Execute()
+//
+// Attach is not supported with [NewSQL] because qwr cannot control connection
+// creation for user-provided database handles.
+//
 // # Observing Events
 //
 // qwr emits structured events for all significant operations. Subscribe to
@@ -68,6 +100,7 @@
 //
 //   - profile.ReadLight(), ReadBalanced(), ReadHeavy()
 //   - profile.WriteLight(), WriteBalanced(), WriteHeavy()
+//   - profile.Attached() for per-schema PRAGMAs on attached databases
 //
 // # Error Handling
 //
@@ -82,5 +115,6 @@
 // # Custom SQLite Drivers
 //
 // qwr uses modernc.org/sqlite by default. Use [NewSQL] to provide your own
-// database connections with a different driver.
+// database connections with a different driver. Note that [NewSQL] does not
+// support Attach - manage ATTACH statements on your own connections.
 package qwr
