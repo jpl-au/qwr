@@ -269,7 +269,7 @@ func TestAttachReservedAlias(t *testing.T) {
 }
 
 func TestAttachNewSQLRejected(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", t.TempDir()+"/test.db")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,6 +653,74 @@ func TestResetReaderPoolWithConcurrentReads(t *testing.T) {
 	}
 	if err := row.Scan(&evtCount); err != nil {
 		t.Fatalf("post-reset attached scan: %v", err)
+	}
+}
+
+// Verify invalid schema names are rejected by maintenance methods
+func TestInvalidSchemaRejected(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+
+	mgr, err := New(mainDB).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	badSchemas := []string{
+		"schema; DROP TABLE x",
+		"has spaces",
+		"1startsdigit",
+	}
+
+	for _, s := range badSchemas {
+		if err := mgr.RunVacuum(s); err == nil {
+			t.Errorf("RunVacuum(%q): expected error, got nil", s)
+		}
+		if err := mgr.RunIncrementalVacuum(0, s); err == nil {
+			t.Errorf("RunIncrementalVacuum(%q): expected error, got nil", s)
+		}
+		if err := mgr.RunCheckpoint("PASSIVE", s); err == nil {
+			t.Errorf("RunCheckpoint(%q): expected error, got nil", s)
+		}
+	}
+}
+
+// Verify renamed getter methods work
+func TestRenamedGetters(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+
+	mgr, err := New(mainDB).
+		Reader(profile.ReadBalanced()).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	if mgr.ReaderProfile() == nil {
+		t.Error("ReaderProfile() returned nil")
+	}
+	if mgr.WriterProfile() == nil {
+		t.Error("WriterProfile() returned nil")
+	}
+	if mgr.Errors() == nil {
+		// Errors() returns nil when queue is empty - that's fine
+	}
+	_, found := mgr.ErrorByID(999)
+	if found {
+		t.Error("ErrorByID(999) should not find anything")
+	}
+	status, err := mgr.JobStatus(999)
+	if err != nil {
+		t.Errorf("JobStatus: %v", err)
+	}
+	if status != "unknown" {
+		t.Errorf("JobStatus = %q, want unknown", status)
 	}
 }
 

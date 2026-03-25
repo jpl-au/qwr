@@ -201,7 +201,7 @@ func TestApply(t *testing.T) {
 }
 
 func TestApplyRejectsUnknownPragma(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", t.TempDir()+"/test.db")
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestProfileApplyToDatabase(t *testing.T) {
 	}
 
 	for i, p := range profiles {
-		db, err := sql.Open("sqlite", ":memory:")
+		db, err := sql.Open("sqlite", t.TempDir()+"/test.db")
 		if err != nil {
 			t.Fatalf("Profile %d: Failed to open database: %v", i, err)
 		}
@@ -380,5 +380,54 @@ func TestProfileApplyToDatabase(t *testing.T) {
 		}
 
 		db.Close()
+	}
+}
+
+func TestCustomPragma(t *testing.T) {
+	p := New().Custom(Pragma("wal_autocheckpoint"), 1000)
+
+	if p.pragmas[Pragma("wal_autocheckpoint")] != 1000 {
+		t.Errorf("Custom pragma not set, got %v", p.pragmas[Pragma("wal_autocheckpoint")])
+	}
+
+	// Verify it flows through DSNPragmas
+	params := p.DSNPragmas()
+	if len(params) != 1 {
+		t.Fatalf("DSNPragmas() returned %d params, want 1", len(params))
+	}
+	if !strings.Contains(params[0], "wal_autocheckpoint") {
+		t.Errorf("DSNPragmas missing custom pragma, got %q", params[0])
+	}
+
+	// Verify it flows through SchemaStatements
+	stmts := p.SchemaStatements("analytics")
+	if len(stmts) != 1 {
+		t.Fatalf("SchemaStatements() returned %d stmts, want 1", len(stmts))
+	}
+	if !strings.Contains(stmts[0], "analytics.wal_autocheckpoint") {
+		t.Errorf("SchemaStatements missing custom pragma, got %q", stmts[0])
+	}
+}
+
+func TestCustomPragmaInvalidNameSkipped(t *testing.T) {
+	// An invalid pragma name set via Custom should be skipped by
+	// DSNPragmas and SchemaStatements, and rejected by Apply
+	p := New().Custom(Pragma("invalid; name"), "value")
+
+	if len(p.DSNPragmas()) != 0 {
+		t.Error("DSNPragmas should skip invalid pragma name")
+	}
+	if len(p.SchemaStatements("s")) != 0 {
+		t.Error("SchemaStatements should skip invalid pragma name")
+	}
+
+	db, err := sql.Open("sqlite", t.TempDir()+"/test.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := p.Apply(db); err == nil {
+		t.Error("Apply should reject invalid pragma name")
 	}
 }
