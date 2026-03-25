@@ -158,6 +158,38 @@ func TestCheckpointOnClose(t *testing.T) {
 	}
 }
 
+// TestOpenRelativePath verifies that a relative path like
+// .llmd/llmd.db opens correctly. Relative paths must be resolved
+// to absolute before building the file: URI in the DSN.
+func TestOpenRelativePath(t *testing.T) {
+	dir := t.TempDir()
+	orig, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(orig)
+
+	if err := os.MkdirAll(".llmd", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr, err := New(".llmd/test.db").Open()
+	if err != nil {
+		t.Fatalf("failed to open with relative path: %v", err)
+	}
+	defer mgr.Close()
+
+	// Verify it actually works.
+	if _, err := mgr.Query("CREATE TABLE t (id INTEGER)").Write(); err != nil {
+		t.Fatalf("failed to create table: %v", err)
+	}
+
+	// Verify the file exists on disk.
+	if _, err := os.Stat(filepath.Join(dir, ".llmd", "test.db")); err != nil {
+		t.Fatalf("database file not created: %v", err)
+	}
+}
+
 // TestCheckpointMode verifies checkpoint.Mode values.
 func TestCheckpointMode(t *testing.T) {
 	tests := []struct {

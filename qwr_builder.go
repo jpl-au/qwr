@@ -435,13 +435,21 @@ func buildDSN(path string, p *profile.Profile) string {
 		return path
 	}
 
-	// Use file: URI format for the DSN.
+	// Use file: URI format for the DSN. Relative paths must be
+	// resolved to absolute before building the URI, otherwise
+	// url.URL produces an invalid authority component.
 	var b strings.Builder
 	if !strings.HasPrefix(path, "file:") {
 		if path == ":memory:" {
 			b.WriteString("file::memory:")
 		} else {
-			u := &url.URL{Scheme: "file", Path: fileURIPath(path)}
+			p := path
+			if !filepath.IsAbs(p) {
+				if abs, err := filepath.Abs(p); err == nil {
+					p = abs
+				}
+			}
+			u := &url.URL{Scheme: "file", Path: fileURIPath(p)}
 			b.WriteString(u.String())
 		}
 	} else {
