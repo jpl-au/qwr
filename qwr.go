@@ -592,13 +592,12 @@ func (m *Manager) attachOnWriter(att attachment) error {
 }
 
 // ResetReaderPool creates a new reader pool using the same connector,
-// then closes the old one. New connections will include any attachments
-// added via Manager.Attach since the pool was last created.
+// then drains and closes the old one. New connections will include any
+// attachments added via Manager.Attach since the pool was last created.
 //
-// Callers should ensure no read operations are in flight when calling
-// this method. In-flight queries using prepared statements from the old
-// cache may fail after the swap. For a clean reset, pause your read
-// workload before calling ResetReaderPool.
+// In-flight read operations on the old pool will complete before the old
+// resources are released. New reads issued after the swap use the new pool
+// immediately.
 func (m *Manager) ResetReaderPool() error {
 	if m.closed.Load() {
 		return ErrManagerClosed
@@ -632,11 +631,13 @@ func (m *Manager) ResetReaderPool() error {
 	m.reader = newReader
 	m.readStmtCache = newCache
 
-	// Close old resources after the swap
+	// Close the old pool first - sql.DB.Close() waits for in-flight
+	// queries to finish. Only then close the cache, so no statements
+	// are pulled out from under active readers.
+	oldReader.Close()
 	if oldCache != nil {
 		oldCache.Close()
 	}
-	oldReader.Close()
 
 	return nil
 }
