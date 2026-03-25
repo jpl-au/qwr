@@ -276,7 +276,7 @@ func TestAttachNewSQLRejected(t *testing.T) {
 	defer db.Close()
 
 	_, err = NewSQL(db, db).
-		Attach("extra", "/tmp/extra.db").
+		Attach("extra", filepath.Join(t.TempDir(), "extra.db")).
 		Open()
 	if err != ErrAttachNotSupported {
 		t.Fatalf("expected ErrAttachNotSupported, got %v", err)

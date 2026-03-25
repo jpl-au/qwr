@@ -215,7 +215,7 @@ func (mb *qwrBuilder) Checkpoint(mode checkpoint.Mode) *qwrBuilder {
 // The manager must be closed and recreated to modify configuration.
 func (mb *qwrBuilder) Open() (*Manager, error) {
 	// Reject Attach with NewSQL
-	if mb.isSQL && len(mb.attachments) > 0 {
+	if mb.isSQL && (len(mb.attachments) > 0 || len(mb.attachErrs) > 0) {
 		return nil, ErrAttachNotSupported
 	}
 
@@ -441,7 +441,7 @@ func buildDSN(path string, p *profile.Profile) string {
 		if path == ":memory:" {
 			b.WriteString("file::memory:")
 		} else {
-			u := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+			u := &url.URL{Scheme: "file", Path: fileURIPath(path)}
 			b.WriteString(u.String())
 		}
 	} else {
