@@ -331,6 +331,142 @@ func TestAttachPerSchemaCheckpoint(t *testing.T) {
 	}
 }
 
+// T1: Injection vector tests
+func TestAttachInvalidAliasRejected(t *testing.T) {
+	tests := []struct {
+		name  string
+		alias string
+	}{
+		{"sql_injection", "test; DROP TABLE x"},
+		{"spaces", "my alias"},
+		{"hyphen", "my-db"},
+		{"dot", "my.db"},
+		{"starts_with_digit", "1bad"},
+		{"unicode", "caf\u00e9"},
+		{"empty", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newAttachment(tt.alias, "/tmp/test.db", "/tmp/main.db", nil)
+			if err == nil {
+				t.Errorf("expected error for alias %q, got nil", tt.alias)
+			}
+		})
+	}
+}
+
+// T2: Special-character path tests
+func TestAttachSpecialCharPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"spaces", "path with spaces/test.db"},
+		{"single_quote", "it's/test.db"},
+		{"semicolon", "a;b/test.db"},
+		{"unicode", "caf\u00e9/test.db"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mainDB := filepath.Join(dir, "main.db")
+
+			// Create the subdirectory and database
+			dbPath := filepath.Join(dir, tt.path)
+			if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			setupAttachDB(t, dbPath)
+
+			mgr, err := New(mainDB).
+				Writer(profile.WriteBalanced()).
+				Attach("ext", dbPath).
+				Open()
+			if err != nil {
+				t.Fatalf("Open failed for path %q: %v", tt.path, err)
+			}
+			defer mgr.Close()
+
+			// Verify the attached database is usable
+			_, err = mgr.Query("INSERT INTO ext.events (action) VALUES (?)", "test").Execute()
+			if err != nil {
+				t.Fatalf("insert failed for path %q: %v", tt.path, err)
+			}
+		})
+	}
+}
+
+// T3: Runtime attach with profile
+func TestAttachRuntimeWithProfile(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+	attachDB := filepath.Join(dir, "profiled.db")
+
+	setupAttachDB(t, attachDB)
+
+	mgr, err := New(mainDB).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	// Attach with a profile that sets PRAGMAs
+	prof := profile.Attached().
+		WithJournalMode(profile.JournalWal).
+		WithCacheSize(-30720)
+
+	if err := mgr.Attach("profiled", attachDB, prof); err != nil {
+		t.Fatalf("Attach with profile: %v", err)
+	}
+
+	// Insert succeeding proves the ATTACH + PRAGMAs were applied
+	_, err = mgr.Query("INSERT INTO profiled.events (action) VALUES (?)", "with-profile").Execute()
+	if err != nil {
+		t.Fatalf("insert into profiled-attached db: %v", err)
+	}
+}
+
+// T4: :memory: attach rejection
+func TestAttachMemoryRejected(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+
+	_, err := New(mainDB).
+		Attach("cache", ":memory:").
+		Open()
+	if err == nil {
+		t.Fatal("expected error for :memory: attach, got nil")
+	}
+
+	// Also test runtime attach
+	mgr, err := New(mainDB).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	err = mgr.Attach("cache", ":memory:")
+	if err == nil {
+		t.Fatal("expected error for runtime :memory: attach, got nil")
+	}
+}
+
+// T5: Relative path with :memory: main DB rejected
+func TestAttachRelativePathMemoryMainRejected(t *testing.T) {
+	_, err := New(":memory:").
+		Attach("ext", "relative.db").
+		Open()
+	if err == nil {
+		t.Fatal("expected error for relative path with :memory: main, got nil")
+	}
+}
+
 // setupAttachDB creates a database file with an events table.
 func setupAttachDB(t *testing.T, path string) {
 	t.Helper()
