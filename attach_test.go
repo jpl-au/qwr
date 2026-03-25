@@ -2,6 +2,7 @@ package qwr
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -464,6 +465,194 @@ func TestAttachRelativePathMemoryMainRejected(t *testing.T) {
 		Open()
 	if err == nil {
 		t.Fatal("expected error for relative path with :memory: main, got nil")
+	}
+}
+
+// Verify writer pool is forced to MaxOpenConns=1 regardless of profile
+func TestWriterMaxOpenConnsEnforced(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+
+	// Create a profile that requests 5 writer connections
+	wp := profile.WriteBalanced().WithMaxOpenConns(5)
+
+	mgr, err := New(mainDB).
+		Writer(wp).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	stats := mgr.writer.Stats()
+	if stats.MaxOpenConnections != 1 {
+		t.Errorf("writer MaxOpenConnections = %d, want 1", stats.MaxOpenConnections)
+	}
+}
+
+// Verify methods return ErrManagerClosed after Close()
+func TestMethodsAfterCloseReturnError(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+	attachDB := filepath.Join(dir, "extra.db")
+
+	setupAttachDB(t, attachDB)
+
+	mgr, err := New(mainDB).
+		Reader(profile.ReadBalanced()).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	mgr.Close()
+
+	if err := mgr.Attach("extra", attachDB); err != ErrManagerClosed {
+		t.Errorf("Attach after Close: got %v, want ErrManagerClosed", err)
+	}
+	if err := mgr.ResetReaderPool(); err != ErrManagerClosed {
+		t.Errorf("ResetReaderPool after Close: got %v, want ErrManagerClosed", err)
+	}
+	if err := mgr.RunVacuum(); err != ErrManagerClosed {
+		t.Errorf("RunVacuum after Close: got %v, want ErrManagerClosed", err)
+	}
+	if err := mgr.RunIncrementalVacuum(0); err != ErrManagerClosed {
+		t.Errorf("RunIncrementalVacuum after Close: got %v, want ErrManagerClosed", err)
+	}
+	if err := mgr.RunCheckpoint("PASSIVE"); err != ErrManagerClosed {
+		t.Errorf("RunCheckpoint after Close: got %v, want ErrManagerClosed", err)
+	}
+}
+
+// Verify invalid checkpoint.Mode is rejected
+func TestInvalidCheckpointModeRejected(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+
+	// Invalid mode at Open() time
+	_, err := New(mainDB).
+		Writer(profile.WriteBalanced()).
+		Checkpoint("INVALID; DROP TABLE x").
+		Open()
+	if err == nil {
+		t.Fatal("expected error for invalid checkpoint mode at Open, got nil")
+	}
+
+	// Invalid mode at RunCheckpoint() time
+	mgr, err := New(mainDB).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	if err := mgr.RunCheckpoint("INVALID; DROP TABLE x"); err == nil {
+		t.Fatal("expected error for invalid checkpoint mode at RunCheckpoint, got nil")
+	}
+}
+
+// Verify ResetReaderPool drains in-flight queries and works after reset.
+// During the swap, readers that grabbed the old pool pointer may see a
+// transient "database is closed" error - this is expected and benign.
+func TestResetReaderPoolWithConcurrentReads(t *testing.T) {
+	dir := t.TempDir()
+	mainDB := filepath.Join(dir, "main.db")
+	attachDB := filepath.Join(dir, "concurrent.db")
+
+	setupAttachDB(t, attachDB)
+
+	mgr, err := New(mainDB).
+		Reader(profile.ReadBalanced()).
+		Writer(profile.WriteBalanced()).
+		Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer mgr.Close()
+
+	// Create a table and insert data
+	_, err = mgr.Query("CREATE TABLE items (id INTEGER PRIMARY KEY, val TEXT)").Execute()
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	for i := range 100 {
+		_, err = mgr.Query("INSERT INTO items (val) VALUES (?)", i).Execute()
+		if err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	// Start concurrent readers
+	done := make(chan struct{})
+	panicked := make(chan string, 5)
+
+	for range 5 {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked <- fmt.Sprintf("%v", r)
+				}
+			}()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					// Transient "database is closed" errors during the
+					// swap are expected - the important thing is no panics
+					// and no data corruption.
+					rows, err := mgr.Query("SELECT val FROM items").Read()
+					if err != nil {
+						continue
+					}
+					for rows.Next() {
+						var v string
+						rows.Scan(&v)
+					}
+					rows.Close()
+				}
+			}
+		}()
+	}
+
+	// Attach and reset while readers are active
+	if err := mgr.Attach("concurrent", attachDB); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if err := mgr.ResetReaderPool(); err != nil {
+		t.Fatalf("ResetReaderPool: %v", err)
+	}
+
+	close(done)
+
+	// Verify no panics occurred
+	select {
+	case p := <-panicked:
+		t.Fatalf("concurrent reader panicked: %s", p)
+	default:
+	}
+
+	// Verify reads work after the reset (including attached DB)
+	var count int
+	row, err := mgr.Query("SELECT COUNT(*) FROM items").ReadRow()
+	if err != nil {
+		t.Fatalf("post-reset read: %v", err)
+	}
+	if err := row.Scan(&count); err != nil {
+		t.Fatalf("post-reset scan: %v", err)
+	}
+	if count != 100 {
+		t.Errorf("got count=%d, want 100", count)
+	}
+
+	var evtCount int
+	row, err = mgr.Query("SELECT COUNT(*) FROM concurrent.events").ReadRow()
+	if err != nil {
+		t.Fatalf("post-reset attached read: %v", err)
+	}
+	if err := row.Scan(&evtCount); err != nil {
+		t.Fatalf("post-reset attached scan: %v", err)
 	}
 }
 

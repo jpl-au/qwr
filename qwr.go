@@ -595,9 +595,10 @@ func (m *Manager) attachOnWriter(att attachment) error {
 // then drains and closes the old one. New connections will include any
 // attachments added via Manager.Attach since the pool was last created.
 //
-// In-flight read operations on the old pool will complete before the old
-// resources are released. New reads issued after the swap use the new pool
-// immediately.
+// In-flight queries that have already started (rows being iterated) will
+// complete before the old resources are released. However, a read that
+// grabs the old pool pointer just before the swap may see a transient
+// "database is closed" error. This is benign and safe to retry.
 func (m *Manager) ResetReaderPool() error {
 	if m.closed.Load() {
 		return ErrManagerClosed
