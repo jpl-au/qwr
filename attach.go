@@ -64,7 +64,10 @@ func newAttachment(alias, path, basePath string, p *profile.Profile) (attachment
 	}
 
 	// Resolve relative paths against the main database's directory.
-	if !filepath.IsAbs(path) && basePath != "" {
+	if !filepath.IsAbs(path) && !strings.HasPrefix(path, "file:") {
+		if basePath == "" || basePath == ":memory:" {
+			return attachment{}, fmt.Errorf("relative attachment path %q requires a file-backed main database", path)
+		}
 		path = filepath.Join(filepath.Dir(basePath), path)
 	}
 

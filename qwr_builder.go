@@ -23,7 +23,8 @@ type qwrBuilder struct {
 	path             string
 	pendingObservers []EventHandler
 	attachments      []attachment
-	isSQL            bool // true when created via NewSQL
+	attachErrs       []error // deferred validation errors from Attach()
+	isSQL            bool    // true when created via NewSQL
 }
 
 // New creates a new qwr Manager instance builder
@@ -168,9 +169,7 @@ func (mb *qwrBuilder) Attach(alias, path string, p ...*profile.Profile) *qwrBuil
 	}
 	att, err := newAttachment(alias, path, mb.path, prof)
 	if err != nil {
-		// Store the error to surface at Open() time. We append a sentinel
-		// attachment with the alias so we can produce a useful error message.
-		mb.attachments = append(mb.attachments, attachment{alias: alias, path: err.Error()})
+		mb.attachErrs = append(mb.attachErrs, fmt.Errorf("attachment %q: %w", alias, err))
 		return mb
 	}
 	mb.attachments = append(mb.attachments, att)
@@ -230,11 +229,9 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		return nil, errors.New("database path cannot be empty when not using NewSQL()")
 	}
 
-	// Validate attachments (re-validate to catch deferred errors from builder)
-	for _, att := range mb.attachments {
-		if att.attachSQL == "" {
-			return nil, fmt.Errorf("invalid attachment %q: %s", att.alias, att.path)
-		}
+	// Surface any deferred attachment validation errors
+	if len(mb.attachErrs) > 0 {
+		return nil, errors.Join(mb.attachErrs...)
 	}
 
 	// Check for duplicate aliases

@@ -68,7 +68,7 @@ type Options struct {
 	StmtCacheMaxSize int
 
 	// ErrorQueueMaxSize caps the number of errors retained in memory
-	// for inspection via GetErrorByID. When full, oldest errors are
+	// for inspection via ErrorByID. When full, oldest errors are
 	// evicted. If ErrorLogPath is set, evicted errors are persisted
 	// to disk first.
 	// Default: 1000.

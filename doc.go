@@ -108,7 +108,7 @@
 // support for transient failures. Errors are classified by type to determine
 // appropriate retry strategies.
 //
-//	if jobErr, found := manager.GetErrorByID(jobID); found {
+//	if jobErr, found := manager.ErrorByID(jobID); found {
 //		log.Printf("Job %d failed: %v", jobID, jobErr.Error())
 //	}
 //

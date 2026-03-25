@@ -339,26 +339,26 @@ func (m *Manager) WaitForIdle(ctx context.Context) error {
 	}
 }
 
-// GetReaderProfile returns the current reader profile
-func (m *Manager) GetReaderProfile() *profile.Profile {
+// ReaderProfile returns the current reader profile
+func (m *Manager) ReaderProfile() *profile.Profile {
 	return m.readerProfile
 }
 
-// GetWriterProfile returns the current writer profile
-func (m *Manager) GetWriterProfile() *profile.Profile {
+// WriterProfile returns the current writer profile
+func (m *Manager) WriterProfile() *profile.Profile {
 	return m.writerProfile
 }
 
-// GetErrors returns all errors in the error queue
-func (m *Manager) GetErrors() []JobError {
+// Errors returns all errors in the error queue
+func (m *Manager) Errors() []JobError {
 	if m.errorQueue == nil {
 		return nil
 	}
 	return m.errorQueue.GetAll()
 }
 
-// GetErrorByID retrieves a specific error from the queue
-func (m *Manager) GetErrorByID(jobID int64) (JobError, bool) {
+// ErrorByID retrieves a specific error from the queue
+func (m *Manager) ErrorByID(jobID int64) (JobError, bool) {
 	if m.errorQueue == nil {
 		return JobError{}, false
 	}
@@ -650,8 +650,8 @@ func (m *Manager) SetSecureDelete(enabled bool) error {
 	return err
 }
 
-// GetJobStatus checks if a job failed by looking in the error queue
-func (m *Manager) GetJobStatus(jobID int64) (string, error) {
+// JobStatus checks if a job failed by looking in the error queue
+func (m *Manager) JobStatus(jobID int64) (string, error) {
 	if m.errorQueue == nil {
 		return "", ErrErrorQueueDisabled
 	}
