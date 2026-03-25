@@ -35,6 +35,7 @@ type Manager struct {
 	checkpoint     checkpoint.Mode // WAL checkpoint mode to run on Close()
 
 	// ATTACH support
+	attachMu        sync.Mutex   // Protects attachments slice
 	attachments     []attachment // Attached databases for checkpoint on close
 	readerConnector *connInit    // Connector for reader pool (nil for NewSQL)
 	writerConnector *connInit    // Connector for writer pool (nil for NewSQL)
@@ -260,7 +261,10 @@ func (m *Manager) doClose() error {
 		}
 
 		// Checkpoint each attached database
-		for _, att := range m.attachments {
+		m.attachMu.Lock()
+		atts := m.attachments
+		m.attachMu.Unlock()
+		for _, att := range atts {
 			stmt := fmt.Sprintf("PRAGMA %s.wal_checkpoint(%s)", att.alias, m.checkpoint)
 			if _, err := m.writer.Exec(stmt); err != nil {
 				errs = append(errs, fmt.Errorf("checkpoint %s: %w", att.alias, err))
@@ -417,11 +421,17 @@ func (m *Manager) ResetCaches() {
 // RunVacuum performs a VACUUM operation on the main database or an
 // attached database if a schema name is provided.
 func (m *Manager) RunVacuum(schema ...string) error {
+	if m.closed.Load() {
+		return ErrManagerClosed
+	}
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
 	stmt := "VACUUM"
 	if len(schema) > 0 && schema[0] != "" {
+		if err := validSchema(schema[0]); err != nil {
+			return err
+		}
 		stmt = fmt.Sprintf("VACUUM %s", schema[0])
 	}
 	m.events.Emit(Event{Type: EventVacuumStarted})
@@ -437,6 +447,9 @@ func (m *Manager) RunVacuum(schema ...string) error {
 // RunIncrementalVacuum performs incremental vacuum on the main database
 // or an attached database if a schema name is provided.
 func (m *Manager) RunIncrementalVacuum(pages int, schema ...string) error {
+	if m.closed.Load() {
+		return ErrManagerClosed
+	}
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
@@ -445,6 +458,9 @@ func (m *Manager) RunIncrementalVacuum(pages int, schema ...string) error {
 	}
 	prefix := "PRAGMA"
 	if len(schema) > 0 && schema[0] != "" {
+		if err := validSchema(schema[0]); err != nil {
+			return err
+		}
 		prefix = fmt.Sprintf("PRAGMA %s.", schema[0])
 	}
 	m.events.Emit(Event{Type: EventVacuumStarted})
@@ -460,14 +476,23 @@ func (m *Manager) RunIncrementalVacuum(pages int, schema ...string) error {
 // RunCheckpoint triggers a WAL checkpoint on the main database or an
 // attached database if a schema name is provided.
 func (m *Manager) RunCheckpoint(mode checkpoint.Mode, schema ...string) error {
+	if m.closed.Load() {
+		return ErrManagerClosed
+	}
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
 	if mode == checkpoint.None {
 		return nil
 	}
+	if !mode.Valid() {
+		return fmt.Errorf("%w: %q", checkpoint.ErrInvalidMode, mode)
+	}
 	prefix := "PRAGMA"
 	if len(schema) > 0 && schema[0] != "" {
+		if err := validSchema(schema[0]); err != nil {
+			return err
+		}
 		prefix = fmt.Sprintf("PRAGMA %s.", schema[0])
 	}
 	m.events.Emit(Event{Type: EventCheckpointStarted, CheckpointMode: string(mode)})
@@ -490,6 +515,9 @@ func (m *Manager) RunCheckpoint(mode checkpoint.Mode, schema ...string) error {
 //
 // Not supported for managers created with NewSQL.
 func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
+	if m.closed.Load() {
+		return ErrManagerClosed
+	}
 	if m.isSQL {
 		return ErrAttachNotSupported
 	}
@@ -504,6 +532,9 @@ func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
 		return err
 	}
 
+	m.attachMu.Lock()
+	defer m.attachMu.Unlock()
+
 	// Check for duplicate alias across existing attachments
 	for _, existing := range m.attachments {
 		if existing.alias == alias {
@@ -516,11 +547,13 @@ func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
 
 	// Run ATTACH on the writer immediately
 	if m.writer != nil {
-		if _, err := m.writer.Exec(att.attachSQL); err != nil {
+		if _, err := m.writer.Exec(att.attachSQL, att.path); err != nil {
 			return fmt.Errorf("failed to attach %q on writer: %w", alias, err)
 		}
 		for _, stmt := range att.schemaStatements {
 			if _, err := m.writer.Exec(stmt); err != nil {
+				// Rollback the ATTACH to avoid a phantom attachment
+				m.writer.Exec(fmt.Sprintf("DETACH DATABASE %s", alias)) //nolint:errcheck
 				return fmt.Errorf("failed to apply pragma for %q on writer: %w", alias, err)
 			}
 		}
@@ -544,6 +577,9 @@ func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
 // any attachments added via Manager.Attach since the pool was last created.
 // In-flight read operations on the old pool may fail.
 func (m *Manager) ResetReaderPool() error {
+	if m.closed.Load() {
+		return ErrManagerClosed
+	}
 	if m.reader == nil {
 		return ErrReaderDisabled
 	}
@@ -551,30 +587,33 @@ func (m *Manager) ResetReaderPool() error {
 		return errors.New("reader pool reset requires a qwr-managed connector (not available with NewSQL)")
 	}
 
-	// Close old reader statement cache
-	if m.readStmtCache != nil {
-		m.readStmtCache.Close()
-	}
+	// Build new resources before touching the old ones. This ensures we
+	// don't leave the manager in a broken state if creation fails.
+	newReader := sql.OpenDB(m.readerConnector)
+	m.readerProfile.ApplyPool(newReader)
 
-	// Close old reader pool
-	if err := m.reader.Close(); err != nil {
-		return fmt.Errorf("failed to close reader pool: %w", err)
-	}
-
-	// Open new pool with the same connector (which has updated attachments)
-	m.reader = sql.OpenDB(m.readerConnector)
-	m.readerProfile.ApplyPool(m.reader)
-
-	if err := m.reader.Ping(); err != nil {
+	if err := newReader.Ping(); err != nil {
+		newReader.Close()
 		return fmt.Errorf("failed to verify new reader pool: %w", err)
 	}
 
-	// Create new statement cache
-	cache, err := NewStmtCache(m.events, m.options)
+	newCache, err := NewStmtCache(m.events, m.options)
 	if err != nil {
+		newReader.Close()
 		return fmt.Errorf("failed to create reader statement cache: %w", err)
 	}
-	m.readStmtCache = cache
+
+	// Swap: store old references, install new ones
+	oldReader := m.reader
+	oldCache := m.readStmtCache
+	m.reader = newReader
+	m.readStmtCache = newCache
+
+	// Close old resources after the swap
+	if oldCache != nil {
+		oldCache.Close()
+	}
+	oldReader.Close()
 
 	return nil
 }

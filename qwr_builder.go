@@ -220,6 +220,11 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		return nil, ErrAttachNotSupported
 	}
 
+	// Validate checkpoint mode
+	if !mb.checkpoint.Valid() {
+		return nil, fmt.Errorf("%w: %q", checkpoint.ErrInvalidMode, mb.checkpoint)
+	}
+
 	// Validate path only if we need to open databases ourselves
 	if mb.reader == nil && mb.writer == nil && mb.path == "" {
 		return nil, errors.New("database path cannot be empty when not using NewSQL()")
@@ -268,6 +273,25 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 	mb.Manager.attachments = mb.attachments
 	mb.Manager.isSQL = mb.isSQL
 
+	// cleanup closes all resources allocated so far during Open.
+	cleanup := func() {
+		if mb.readStmtCache != nil {
+			mb.readStmtCache.Close()
+		}
+		if mb.reader != nil {
+			_ = mb.reader.Close()
+		}
+		if mb.writeStmtCache != nil {
+			mb.writeStmtCache.Close()
+		}
+		if mb.writer != nil {
+			_ = mb.writer.Close()
+		}
+		if mb.events != nil {
+			mb.events.Close()
+		}
+	}
+
 	// Initialise reader if enabled
 	if mb.options.EnableReader {
 		if mb.readerProfile == nil {
@@ -279,11 +303,13 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 			var err error
 			mb.reader, mb.readerConnector, err = openWithConnector(mb.path, mb.readerProfile, mb.attachments)
 			if err != nil {
+				cleanup()
 				return nil, err
 			}
 		} else {
 			// Apply profile to user-provided database
 			if err := mb.readerProfile.Apply(mb.reader); err != nil {
+				cleanup()
 				return nil, fmt.Errorf("failed to apply reader profile: %w", err)
 			}
 		}
@@ -292,7 +318,7 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		var err error
 		mb.readStmtCache, err = NewStmtCache(mb.events, mb.options)
 		if err != nil {
-			_ = mb.reader.Close()
+			cleanup()
 			return nil, fmt.Errorf("failed to create reader statement cache: %w", err)
 		}
 	}
@@ -309,17 +335,13 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		if mb.writer == nil {
 			mb.writer, mb.writerConnector, err = openWithConnector(mb.path, mb.writerProfile, mb.attachments)
 			if err != nil {
-				if mb.reader != nil {
-					_ = mb.reader.Close()
-				}
+				cleanup()
 				return nil, err
 			}
 		} else {
 			// Apply profile to user-provided database
 			if err := mb.writerProfile.Apply(mb.writer); err != nil {
-				if mb.reader != nil {
-					_ = mb.reader.Close()
-				}
+				cleanup()
 				return nil, fmt.Errorf("failed to apply writer profile: %w", err)
 			}
 		}
@@ -327,10 +349,7 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		// Initialise writer statement cache
 		mb.writeStmtCache, err = NewStmtCache(mb.events, mb.options)
 		if err != nil {
-			if mb.reader != nil {
-				_ = mb.reader.Close()
-			}
-			_ = mb.writer.Close()
+			cleanup()
 			return nil, fmt.Errorf("failed to create writer statement cache: %w", err)
 		}
 
@@ -405,7 +424,7 @@ func openWithConnector(path string, p *profile.Profile, attachments []attachment
 // buildDSN constructs a modernc.org/sqlite DSN with _pragma parameters
 // from the profile. This ensures PRAGMAs are applied on every new connection.
 func buildDSN(path string, p *profile.Profile) string {
-	if p == nil || len(p.Pragmas) == 0 {
+	if p == nil {
 		return path
 	}
 
@@ -414,14 +433,14 @@ func buildDSN(path string, p *profile.Profile) string {
 		return path
 	}
 
-	// Use file: URI format for the DSN
+	// Use file: URI format for the DSN.
 	var b strings.Builder
 	if !strings.HasPrefix(path, "file:") {
 		if path == ":memory:" {
 			b.WriteString("file::memory:")
 		} else {
-			b.WriteString("file:")
-			b.WriteString(filepath.ToSlash(path))
+			u := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+			b.WriteString(u.String())
 		}
 	} else {
 		b.WriteString(path)

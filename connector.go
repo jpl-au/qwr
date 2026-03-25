@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 )
 
@@ -28,6 +30,8 @@ func (c *connInit) Connect(ctx context.Context) (driver.Conn, error) {
 		return nil, err
 	}
 
+	// Snapshot the attachment list. Safe because addAttachment only appends
+	// under write lock, so a copied slice header is a stable view.
 	c.mu.RLock()
 	atts := c.attachments
 	c.mu.RUnlock()
@@ -38,19 +42,25 @@ func (c *connInit) Connect(ctx context.Context) (driver.Conn, error) {
 
 	execer, ok := conn.(driver.ExecerContext)
 	if !ok {
-		conn.Close()
-		return nil, fmt.Errorf("qwr: driver connection does not support ExecerContext")
+		return nil, errors.Join(
+			fmt.Errorf("qwr: driver connection does not support ExecerContext"),
+			conn.Close(),
+		)
 	}
 
 	for _, att := range atts {
-		if _, err := execer.ExecContext(ctx, att.attachSQL, nil); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("qwr: failed to attach %q: %w", att.alias, err)
+		if _, err := execer.ExecContext(ctx, att.attachSQL, []driver.NamedValue{{Ordinal: 1, Value: att.path}}); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("qwr: failed to attach %q: %w", att.alias, err),
+				conn.Close(),
+			)
 		}
 		for _, stmt := range att.schemaStatements {
 			if _, err := execer.ExecContext(ctx, stmt, nil); err != nil {
-				conn.Close()
-				return nil, fmt.Errorf("qwr: failed to apply pragma for %q: %w", att.alias, err)
+				return nil, errors.Join(
+					fmt.Errorf("qwr: failed to apply pragma for %q: %w", att.alias, err),
+					conn.Close(),
+				)
 			}
 		}
 	}
@@ -84,14 +94,18 @@ func (c *connInit) hasAlias(alias string) bool {
 }
 
 // sqliteDriver returns a reference to the registered "sqlite" driver.
-// It opens a temporary in-memory database to extract the driver, then
-// closes it immediately.
+// The modernc.org/sqlite package does not export its driver.Driver
+// directly, so we extract it via a temporary in-memory connection.
+// db.Driver() returns the shared instance; the temporary database
+// is closed immediately.
 func sqliteDriver() (driver.Driver, error) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		return nil, fmt.Errorf("qwr: failed to open sqlite driver: %w", err)
 	}
 	drv := db.Driver()
-	db.Close()
+	if err := db.Close(); err != nil {
+		slog.Debug("failed to close temporary driver database", "error", err)
+	}
 	return drv, nil
 }

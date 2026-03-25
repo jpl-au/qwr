@@ -14,11 +14,11 @@ func TestNew(t *testing.T) {
 	if p == nil {
 		t.Fatal("New() returned nil")
 	}
-	if p.Pragmas == nil {
+	if p.pragmas == nil {
 		t.Error("Pragmas map not initialized")
 	}
-	if len(p.Pragmas) != 0 {
-		t.Errorf("Pragmas map should be empty, got %d entries", len(p.Pragmas))
+	if len(p.pragmas) != 0 {
+		t.Errorf("Pragmas map should be empty, got %d entries", len(p.pragmas))
 	}
 }
 
@@ -50,48 +50,48 @@ func TestProfileBuilder(t *testing.T) {
 	if p.ConnMaxLifetime != time.Hour {
 		t.Errorf("ConnMaxLifetime = %v, want %v", p.ConnMaxLifetime, time.Hour)
 	}
-	if p.Pragmas["journal_mode"] != "WAL" {
-		t.Errorf("journal_mode = %v, want WAL", p.Pragmas["journal_mode"])
+	if p.pragmas[PragmaJournalMode] != "WAL" {
+		t.Errorf("journal_mode = %v, want WAL", p.pragmas[PragmaJournalMode])
 	}
-	if p.Pragmas["synchronous"] != "1" {
-		t.Errorf("synchronous = %v, want 1", p.Pragmas["synchronous"])
+	if p.pragmas[PragmaSynchronous] != "1" {
+		t.Errorf("synchronous = %v, want 1", p.pragmas[PragmaSynchronous])
 	}
-	if p.Pragmas["foreign_keys"] != "ON" {
-		t.Errorf("foreign_keys = %v, want ON", p.Pragmas["foreign_keys"])
+	if p.pragmas[PragmaForeignKeys] != "ON" {
+		t.Errorf("foreign_keys = %v, want ON", p.pragmas[PragmaForeignKeys])
 	}
-	if p.Pragmas["cache_size"] != -102400 {
-		t.Errorf("cache_size = %v, want -102400", p.Pragmas["cache_size"])
+	if p.pragmas[PragmaCacheSize] != -102400 {
+		t.Errorf("cache_size = %v, want -102400", p.pragmas[PragmaCacheSize])
 	}
-	if p.Pragmas["page_size"] != 8192 {
-		t.Errorf("page_size = %v, want 8192", p.Pragmas["page_size"])
+	if p.pragmas[PragmaPageSize] != 8192 {
+		t.Errorf("page_size = %v, want 8192", p.pragmas[PragmaPageSize])
 	}
 }
 
 func TestForeignKeysDisabled(t *testing.T) {
 	p := New().WithForeignKeys(false)
-	if p.Pragmas["foreign_keys"] != "OFF" {
-		t.Errorf("foreign_keys = %v, want OFF", p.Pragmas["foreign_keys"])
+	if p.pragmas[PragmaForeignKeys] != "OFF" {
+		t.Errorf("foreign_keys = %v, want OFF", p.pragmas[PragmaForeignKeys])
 	}
 }
 
 func TestRecursiveTriggersDisabled(t *testing.T) {
 	p := New().WithRecursiveTriggers(false)
-	if p.Pragmas["recursive_triggers"] != "OFF" {
-		t.Errorf("recursive_triggers = %v, want OFF", p.Pragmas["recursive_triggers"])
+	if p.pragmas[PragmaRecursiveTriggers] != "OFF" {
+		t.Errorf("recursive_triggers = %v, want OFF", p.pragmas[PragmaRecursiveTriggers])
 	}
 }
 
 func TestSecureDeleteEnabled(t *testing.T) {
 	p := New().WithSecureDelete(true)
-	if p.Pragmas["secure_delete"] != "ON" {
-		t.Errorf("secure_delete = %v, want ON", p.Pragmas["secure_delete"])
+	if p.pragmas[PragmaSecureDelete] != "ON" {
+		t.Errorf("secure_delete = %v, want ON", p.pragmas[PragmaSecureDelete])
 	}
 }
 
 func TestQueryOnlyEnabled(t *testing.T) {
 	p := New().WithQueryOnly(true)
-	if p.Pragmas["query_only"] != "ON" {
-		t.Errorf("query_only = %v, want ON", p.Pragmas["query_only"])
+	if p.pragmas[PragmaQueryOnly] != "ON" {
+		t.Errorf("query_only = %v, want ON", p.pragmas[PragmaQueryOnly])
 	}
 }
 
@@ -112,18 +112,18 @@ func TestClone(t *testing.T) {
 	if clone.MaxIdleConns != original.MaxIdleConns {
 		t.Errorf("Clone MaxIdleConns = %d, want %d", clone.MaxIdleConns, original.MaxIdleConns)
 	}
-	if clone.Pragmas["journal_mode"] != original.Pragmas["journal_mode"] {
-		t.Errorf("Clone journal_mode = %v, want %v", clone.Pragmas["journal_mode"], original.Pragmas["journal_mode"])
+	if clone.pragmas[PragmaJournalMode] != original.pragmas[PragmaJournalMode] {
+		t.Errorf("Clone journal_mode = %v, want %v", clone.pragmas[PragmaJournalMode], original.pragmas[PragmaJournalMode])
 	}
 
 	// Verify deep copy - modifying clone shouldn't affect original
 	clone.MaxOpenConns = 20
-	clone.Pragmas["journal_mode"] = "DELETE"
+	clone.pragmas[PragmaJournalMode] = "DELETE"
 
 	if original.MaxOpenConns == 20 {
 		t.Error("Modifying clone affected original MaxOpenConns")
 	}
-	if original.Pragmas["journal_mode"] == "DELETE" {
+	if original.pragmas[PragmaJournalMode] == "DELETE" {
 		t.Error("Modifying clone affected original Pragmas")
 	}
 }
@@ -208,14 +208,14 @@ func TestApplyRejectsUnknownPragma(t *testing.T) {
 	defer db.Close()
 
 	p := New()
-	p.Pragmas["unknown_pragma"] = "value"
+	p.pragmas[Pragma("invalid; name")] = "value"
 
 	err = p.Apply(db)
 	if err == nil {
-		t.Error("Apply() should reject unknown pragma")
+		t.Error("Apply() should reject invalid pragma name")
 	}
-	if !strings.Contains(err.Error(), "not in allowlist") {
-		t.Errorf("Error should mention allowlist, got: %v", err)
+	if !strings.Contains(err.Error(), "not a valid identifier") {
+		t.Errorf("Error should mention invalid identifier, got: %v", err)
 	}
 }
 
@@ -323,11 +323,11 @@ func TestReadProfiles(t *testing.T) {
 			if tt.profile.MaxOpenConns != tt.conns {
 				t.Errorf("%s MaxOpenConns = %d, want %d", tt.name, tt.profile.MaxOpenConns, tt.conns)
 			}
-			if tt.profile.Pragmas["journal_mode"] != "WAL" {
-				t.Errorf("%s journal_mode = %v, want WAL", tt.name, tt.profile.Pragmas["journal_mode"])
+			if tt.profile.pragmas[PragmaJournalMode] != "WAL" {
+				t.Errorf("%s journal_mode = %v, want WAL", tt.name, tt.profile.pragmas[PragmaJournalMode])
 			}
-			if tt.profile.Pragmas["foreign_keys"] != "ON" {
-				t.Errorf("%s foreign_keys = %v, want ON", tt.name, tt.profile.Pragmas["foreign_keys"])
+			if tt.profile.pragmas[PragmaForeignKeys] != "ON" {
+				t.Errorf("%s foreign_keys = %v, want ON", tt.name, tt.profile.pragmas[PragmaForeignKeys])
 			}
 		})
 	}
@@ -352,8 +352,8 @@ func TestWriteProfiles(t *testing.T) {
 			if tt.profile.MaxIdleConns != 1 {
 				t.Errorf("%s MaxIdleConns = %d, want 1", tt.name, tt.profile.MaxIdleConns)
 			}
-			if tt.profile.Pragmas["journal_mode"] != "WAL" {
-				t.Errorf("%s journal_mode = %v, want WAL", tt.name, tt.profile.Pragmas["journal_mode"])
+			if tt.profile.pragmas[PragmaJournalMode] != "WAL" {
+				t.Errorf("%s journal_mode = %v, want WAL", tt.name, tt.profile.pragmas[PragmaJournalMode])
 			}
 		})
 	}

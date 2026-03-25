@@ -8,6 +8,7 @@ import (
 
 // Error constants
 var (
+	ErrManagerClosed             = errors.New("manager is closed")
 	ErrReaderDisabled            = errors.New("reader is disabled")
 	ErrWriterDisabled            = errors.New("writer is disabled")
 	ErrResultNotFound            = errors.New("result not found")

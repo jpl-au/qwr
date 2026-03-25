@@ -34,6 +34,7 @@ var (
 	ErrAttachEmptyAlias     = errors.New("alias cannot be empty")
 	ErrAttachEmptyPath      = errors.New("path cannot be empty")
 	ErrAttachDuplicateAlias = errors.New("alias is already attached")
+	ErrAttachMemoryPath     = errors.New(":memory: databases are per-connection and cannot be shared across the pool - use file::memory:?cache=shared instead")
 	ErrAttachNotSupported   = errors.New("Attach is not supported with NewSQL - manage ATTACH statements on your own connections")
 )
 
@@ -56,21 +57,34 @@ func newAttachment(alias, path, basePath string, p *profile.Profile) (attachment
 		return attachment{}, fmt.Errorf("%w: %q", ErrAttachInvalidAlias, alias)
 	}
 
+	// Reject bare :memory: - each pooled connection would get its own
+	// isolated database, making cross-pool queries silently broken.
+	if path == ":memory:" {
+		return attachment{}, ErrAttachMemoryPath
+	}
+
 	// Resolve relative paths against the main database's directory.
-	// :memory: is left as-is.
-	if path != ":memory:" && !filepath.IsAbs(path) && basePath != "" {
+	if !filepath.IsAbs(path) && basePath != "" {
 		path = filepath.Join(filepath.Dir(basePath), path)
 	}
 
 	att := attachment{
 		alias:     alias,
 		path:      path,
-		attachSQL: fmt.Sprintf("ATTACH DATABASE '%s' AS %s", path, alias),
+		attachSQL: fmt.Sprintf("ATTACH DATABASE ? AS %s", alias),
 	}
 
-	if p != nil && len(p.Pragmas) > 0 {
+	if p != nil {
 		att.schemaStatements = p.SchemaStatements(alias)
 	}
 
 	return att, nil
+}
+
+// validSchema checks that a schema name is a valid SQLite identifier.
+func validSchema(schema string) error {
+	if !validAlias.MatchString(schema) {
+		return fmt.Errorf("invalid schema name: %q", schema)
+	}
+	return nil
 }

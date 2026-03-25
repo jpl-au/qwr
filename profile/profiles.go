@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"fmt"
 	"maps"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -67,35 +68,43 @@ const (
 	LockingExclusive LockingMode = "EXCLUSIVE"
 )
 
+// Pragma identifies a SQLite PRAGMA by name.
+type Pragma string
+
+// Known pragma names for use with the typed With* methods. Use [Profile.Custom]
+// to set pragmas not listed here.
+const (
+	PragmaJournalMode       Pragma = "journal_mode"
+	PragmaSynchronous       Pragma = "synchronous"
+	PragmaForeignKeys       Pragma = "foreign_keys"
+	PragmaCacheSize         Pragma = "cache_size"
+	PragmaMMapSize          Pragma = "mmap_size"
+	PragmaTempStore         Pragma = "temp_store"
+	PragmaAutoVacuum        Pragma = "auto_vacuum"
+	PragmaPageSize          Pragma = "page_size"
+	PragmaBusyTimeout       Pragma = "busy_timeout"
+	PragmaLockingMode       Pragma = "locking_mode"
+	PragmaRecursiveTriggers Pragma = "recursive_triggers"
+	PragmaSecureDelete      Pragma = "secure_delete"
+	PragmaQueryOnly         Pragma = "query_only"
+)
+
+// validPragmaName matches a valid SQLite pragma identifier.
+var validPragmaName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
 // Profile holds configuration for database connections
 type Profile struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
-	Pragmas         map[string]any
+	pragmas         map[Pragma]any
 }
 
-// New creates a new empty profile with initialized pragmas map
+// New creates a new empty profile with initialised pragmas map
 func New() *Profile {
 	return &Profile{
-		Pragmas: make(map[string]any),
+		pragmas: make(map[Pragma]any),
 	}
-}
-
-var allowedPragmas = map[string]bool{
-	"journal_mode":       true,
-	"synchronous":        true,
-	"foreign_keys":       true,
-	"cache_size":         true,
-	"mmap_size":          true,
-	"temp_store":         true,
-	"auto_vacuum":        true,
-	"page_size":          true,
-	"busy_timeout":       true,
-	"locking_mode":       true,
-	"recursive_triggers": true,
-	"secure_delete":      true,
-	"query_only":         true,
 }
 
 // Apply configures a database connection with this profile.
@@ -104,9 +113,9 @@ var allowedPragmas = map[string]bool{
 // per-connection PRAGMAs, prefer DSNPragmas with a custom connector.
 func (p *Profile) Apply(db *sql.DB) error {
 	p.ApplyPool(db)
-	for name, value := range p.Pragmas {
-		if !allowedPragmas[name] {
-			return fmt.Errorf("pragma %q is not in allowlist", name)
+	for name, value := range p.pragmas {
+		if !validPragmaName.MatchString(string(name)) {
+			return fmt.Errorf("pragma name %q is not a valid identifier", name)
 		}
 		query := fmt.Sprintf("PRAGMA %s = %v", name, value)
 		if _, err := db.Exec(query); err != nil {
@@ -132,8 +141,11 @@ func (p *Profile) ApplyPool(db *sql.DB) {
 // The driver applies these on every new connection, solving the per-connection
 // PRAGMA problem that Apply has with pooled connections.
 func (p *Profile) DSNPragmas() []string {
-	params := make([]string, 0, len(p.Pragmas))
-	for name, value := range p.Pragmas {
+	params := make([]string, 0, len(p.pragmas))
+	for name, value := range p.pragmas {
+		if !validPragmaName.MatchString(string(name)) {
+			continue
+		}
 		params = append(params, fmt.Sprintf("_pragma=%s(%v)", name, value))
 	}
 	return params
@@ -143,8 +155,11 @@ func (p *Profile) DSNPragmas() []string {
 // statements for an attached database. For example, with schema "analytics",
 // a cache_size pragma becomes "PRAGMA analytics.cache_size = -30720".
 func (p *Profile) SchemaStatements(schema string) []string {
-	stmts := make([]string, 0, len(p.Pragmas))
-	for name, value := range p.Pragmas {
+	stmts := make([]string, 0, len(p.pragmas))
+	for name, value := range p.pragmas {
+		if !validPragmaName.MatchString(string(name)) {
+			continue
+		}
 		stmts = append(stmts, fmt.Sprintf("PRAGMA %s.%s = %v", schema, name, value))
 	}
 	return stmts
@@ -162,7 +177,7 @@ func (p *Profile) String() string {
 
 	b.WriteString(", Pragmas: {")
 	i := 0
-	for name, value := range p.Pragmas {
+	for name, value := range p.pragmas {
 		if i > 0 {
 			b.WriteString(", ")
 		}
@@ -179,9 +194,9 @@ func (p *Profile) Clone() *Profile {
 		MaxOpenConns:    p.MaxOpenConns,
 		MaxIdleConns:    p.MaxIdleConns,
 		ConnMaxLifetime: p.ConnMaxLifetime,
-		Pragmas:         make(map[string]any, len(p.Pragmas)),
+		pragmas:         make(map[Pragma]any, len(p.pragmas)),
 	}
-	maps.Copy(clone.Pragmas, p.Pragmas)
+	maps.Copy(clone.pragmas, p.pragmas)
 	return clone
 }
 
@@ -211,22 +226,22 @@ func (p *Profile) WithConnMaxLifetime(d time.Duration) *Profile {
 
 // WithJournalMode sets the journal_mode pragma
 func (p *Profile) WithJournalMode(mode JournalMode) *Profile {
-	p.Pragmas["journal_mode"] = string(mode)
+	p.pragmas[PragmaJournalMode] = string(mode)
 	return p
 }
 
 // WithSynchronous sets the synchronous pragma
 func (p *Profile) WithSynchronous(mode SynchronousMode) *Profile {
-	p.Pragmas["synchronous"] = string(mode)
+	p.pragmas[PragmaSynchronous] = string(mode)
 	return p
 }
 
 // WithForeignKeys sets the foreign_keys pragma
 func (p *Profile) WithForeignKeys(enabled bool) *Profile {
 	if enabled {
-		p.Pragmas["foreign_keys"] = "ON"
+		p.pragmas[PragmaForeignKeys] = "ON"
 	} else {
-		p.Pragmas["foreign_keys"] = "OFF"
+		p.pragmas[PragmaForeignKeys] = "OFF"
 	}
 	return p
 }
@@ -236,7 +251,7 @@ func (p *Profile) WithForeignKeys(enabled bool) *Profile {
 // Larger cache improves read performance but uses more memory.
 // Example: -102400 = 100MB cache (recommended for most applications)
 func (p *Profile) WithCacheSize(kibibytes int) *Profile {
-	p.Pragmas["cache_size"] = kibibytes
+	p.pragmas[PragmaCacheSize] = kibibytes
 	return p
 }
 
@@ -245,19 +260,19 @@ func (p *Profile) WithCacheSize(kibibytes int) *Profile {
 // Larger values can improve performance for read-heavy workloads.
 // Common values: 268435456 (256MB), 536870912 (512MB), 0 (disable mmap)
 func (p *Profile) WithMMapSize(bytes int64) *Profile {
-	p.Pragmas["mmap_size"] = bytes
+	p.pragmas[PragmaMMapSize] = bytes
 	return p
 }
 
 // WithTempStore sets the temp_store pragma
 func (p *Profile) WithTempStore(store TempStore) *Profile {
-	p.Pragmas["temp_store"] = string(store)
+	p.pragmas[PragmaTempStore] = string(store)
 	return p
 }
 
 // WithAutoVacuum sets the auto_vacuum pragma
 func (p *Profile) WithAutoVacuum(mode AutoVacuum) *Profile {
-	p.Pragmas["auto_vacuum"] = string(mode)
+	p.pragmas[PragmaAutoVacuum] = string(mode)
 	return p
 }
 
@@ -266,7 +281,7 @@ func (p *Profile) WithAutoVacuum(mode AutoVacuum) *Profile {
 // Larger pages reduce overhead for large records but use more memory.
 // Common values: 4096 (default), 8192 (good for write-heavy), 16384 (large records)
 func (p *Profile) WithPageSize(bytes int) *Profile {
-	p.Pragmas["page_size"] = bytes
+	p.pragmas[PragmaPageSize] = bytes
 	return p
 }
 
@@ -275,22 +290,22 @@ func (p *Profile) WithPageSize(bytes int) *Profile {
 // Higher values reduce lock contention errors but may increase latency.
 // Common values: 5000 (5 seconds, default), 10000 (high contention), 1000 (low latency)
 func (p *Profile) WithBusyTimeout(ms int) *Profile {
-	p.Pragmas["busy_timeout"] = ms
+	p.pragmas[PragmaBusyTimeout] = ms
 	return p
 }
 
 // WithLockingMode sets the locking_mode pragma
 func (p *Profile) WithLockingMode(mode LockingMode) *Profile {
-	p.Pragmas["locking_mode"] = string(mode)
+	p.pragmas[PragmaLockingMode] = string(mode)
 	return p
 }
 
 // WithRecursiveTriggers sets the recursive_triggers pragma
 func (p *Profile) WithRecursiveTriggers(enabled bool) *Profile {
 	if enabled {
-		p.Pragmas["recursive_triggers"] = "ON"
+		p.pragmas[PragmaRecursiveTriggers] = "ON"
 	} else {
-		p.Pragmas["recursive_triggers"] = "OFF"
+		p.pragmas[PragmaRecursiveTriggers] = "OFF"
 	}
 	return p
 }
@@ -298,9 +313,9 @@ func (p *Profile) WithRecursiveTriggers(enabled bool) *Profile {
 // WithSecureDelete sets the secure_delete pragma
 func (p *Profile) WithSecureDelete(enabled bool) *Profile {
 	if enabled {
-		p.Pragmas["secure_delete"] = "ON"
+		p.pragmas[PragmaSecureDelete] = "ON"
 	} else {
-		p.Pragmas["secure_delete"] = "OFF"
+		p.pragmas[PragmaSecureDelete] = "OFF"
 	}
 	return p
 }
@@ -308,10 +323,22 @@ func (p *Profile) WithSecureDelete(enabled bool) *Profile {
 // WithQueryOnly sets the query_only pragma
 func (p *Profile) WithQueryOnly(enabled bool) *Profile {
 	if enabled {
-		p.Pragmas["query_only"] = "ON"
+		p.pragmas[PragmaQueryOnly] = "ON"
 	} else {
-		p.Pragmas["query_only"] = "OFF"
+		p.pragmas[PragmaQueryOnly] = "OFF"
 	}
+	return p
+}
+
+// Custom sets a PRAGMA not covered by the typed With* methods. The name must
+// be a valid SQLite identifier. Invalid names are rejected by the consumption
+// methods (Apply, DSNPragmas, SchemaStatements).
+//
+// Example:
+//
+//	profile.New().Custom(profile.Pragma("wal_autocheckpoint"), 1000)
+func (p *Profile) Custom(name Pragma, value any) *Profile {
+	p.pragmas[name] = value
 	return p
 }
 
