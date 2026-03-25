@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/fxamacker/cbor/v2 v2.9.0
-	modernc.org/sqlite v1.46.1
+	modernc.org/sqlite v1.47.0
 )
 
 require (

@@ -90,13 +90,12 @@ var allowedPragmas = map[string]bool{
 	"query_only":         true,
 }
 
-// Apply configures a database connection with this profile
+// Apply configures a database connection with this profile.
+// Sets pool parameters and runs PRAGMAs via db.Exec. Note that PRAGMAs
+// applied this way only reach one connection in the pool. For reliable
+// per-connection PRAGMAs, prefer DSNPragmas with a custom connector.
 func (p *Profile) Apply(db *sql.DB) error {
-	db.SetMaxOpenConns(p.MaxOpenConns)
-	db.SetMaxIdleConns(p.MaxIdleConns)
-	if p.ConnMaxLifetime > 0 {
-		db.SetConnMaxLifetime(p.ConnMaxLifetime)
-	}
+	p.ApplyPool(db)
 	for name, value := range p.Pragmas {
 		if !allowedPragmas[name] {
 			return fmt.Errorf("pragma %q is not in allowlist", name)
@@ -107,6 +106,40 @@ func (p *Profile) Apply(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// ApplyPool sets connection pool parameters on the database handle
+// without running any PRAGMAs. Use this with sql.OpenDB when PRAGMAs
+// are handled by the DSN or a custom connector.
+func (p *Profile) ApplyPool(db *sql.DB) {
+	db.SetMaxOpenConns(p.MaxOpenConns)
+	db.SetMaxIdleConns(p.MaxIdleConns)
+	if p.ConnMaxLifetime > 0 {
+		db.SetConnMaxLifetime(p.ConnMaxLifetime)
+	}
+}
+
+// DSNPragmas returns the profile's PRAGMAs formatted for the modernc.org/sqlite
+// DSN query string. Each entry is a key=value pair like "_pragma=journal_mode(WAL)".
+// The driver applies these on every new connection, solving the per-connection
+// PRAGMA problem that Apply has with pooled connections.
+func (p *Profile) DSNPragmas() []string {
+	params := make([]string, 0, len(p.Pragmas))
+	for name, value := range p.Pragmas {
+		params = append(params, fmt.Sprintf("_pragma=%s(%v)", name, value))
+	}
+	return params
+}
+
+// SchemaStatements returns the profile's PRAGMAs as schema-qualified SQL
+// statements for an attached database. For example, with schema "analytics",
+// a cache_size pragma becomes "PRAGMA analytics.cache_size = -30720".
+func (p *Profile) SchemaStatements(schema string) []string {
+	stmts := make([]string, 0, len(p.Pragmas))
+	for name, value := range p.Pragmas {
+		stmts = append(stmts, fmt.Sprintf("PRAGMA %s.%s = %v", schema, name, value))
+	}
+	return stmts
 }
 
 // String returns a string representation of the profile
@@ -395,4 +428,18 @@ func WriteHeavy() *Profile {
 		WithTempStore(TempStoreMemory).
 		WithAutoVacuum(AutoVacuumNone).
 		WithRecursiveTriggers(true)
+}
+
+// Attached creates a profile for an attached database. Only PRAGMA settings
+// are meaningful for attached databases - connection pool parameters
+// (MaxOpenConns, MaxIdleConns, ConnMaxLifetime) are ignored because attached
+// databases share the main connection pool.
+//
+// Use the With* methods to configure per-schema PRAGMAs:
+//
+//	profile.Attached().
+//		WithJournalMode(profile.JournalWal).
+//		WithCacheSize(-30720)
+func Attached() *Profile {
+	return New()
 }

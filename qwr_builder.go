@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jpl-au/qwr/checkpoint"
 	"github.com/jpl-au/qwr/profile"
@@ -20,6 +22,8 @@ type qwrBuilder struct {
 	// Builder-specific fields
 	path             string
 	pendingObservers []EventHandler
+	attachments      []attachment
+	isSQL            bool // true when created via NewSQL
 }
 
 // New creates a new qwr Manager instance builder
@@ -70,6 +74,7 @@ func New(path string, opts ...Options) *qwrBuilder {
 //   - Profiles will be applied to your connections (including SQLite PRAGMAs)
 //   - If you provide a non-SQLite database, PRAGMA errors are your responsibility
 //   - Use WithErrorLogPath() to enable persistent error logging to disk
+//   - Attach() is not supported with NewSQL - manage ATTACH statements on your own connections
 //
 // Example with mattn/go-sqlite3:
 //
@@ -111,6 +116,7 @@ func NewSQL(reader, writer *sql.DB, opts ...Options) *qwrBuilder {
 	// Create the builder with the embedded manager
 	return &qwrBuilder{
 		Manager: manager,
+		isSQL:   true,
 	}
 }
 
@@ -131,6 +137,43 @@ func (mb *qwrBuilder) Reader(p *profile.Profile) *qwrBuilder {
 // Writer sets the writer profile
 func (mb *qwrBuilder) Writer(p *profile.Profile) *qwrBuilder {
 	mb.writerProfile = p
+	return mb
+}
+
+// Attach registers a database to be attached on every connection. The alias
+// is the schema name used to reference the attached database in SQL queries
+// (e.g. SELECT * FROM analytics.events). The path is the database file path,
+// resolved relative to the main database's directory if not absolute.
+//
+// An optional profile configures per-schema PRAGMAs for the attached database.
+// Only PRAGMA settings from the profile are used - pool parameters are ignored
+// since attached databases share the main connection pool.
+//
+// Attach is not supported with NewSQL - Open will return an error.
+//
+// Example:
+//
+//	manager, err := qwr.New("main.db").
+//	    Reader(profile.ReadBalanced()).
+//	    Writer(profile.WriteBalanced()).
+//	    Attach("analytics", "analytics.db", profile.Attached().
+//	        WithJournalMode(profile.JournalWal).
+//	        WithCacheSize(-30720)).
+//	    Attach("cache", ":memory:").
+//	    Open()
+func (mb *qwrBuilder) Attach(alias, path string, p ...*profile.Profile) *qwrBuilder {
+	var prof *profile.Profile
+	if len(p) > 0 {
+		prof = p[0]
+	}
+	att, err := newAttachment(alias, path, mb.path, prof)
+	if err != nil {
+		// Store the error to surface at Open() time. We append a sentinel
+		// attachment with the alias so we can produce a useful error message.
+		mb.attachments = append(mb.attachments, attachment{alias: alias, path: err.Error()})
+		return mb
+	}
+	mb.attachments = append(mb.attachments, att)
 	return mb
 }
 
@@ -167,14 +210,35 @@ func (mb *qwrBuilder) Checkpoint(mode checkpoint.Mode) *qwrBuilder {
 	return mb
 }
 
-// Open initializes and opens database connections
+// Open initialises and opens database connections.
 //
 // After Open() is called, all options become immutable and cannot be changed.
 // The manager must be closed and recreated to modify configuration.
 func (mb *qwrBuilder) Open() (*Manager, error) {
+	// Reject Attach with NewSQL
+	if mb.isSQL && len(mb.attachments) > 0 {
+		return nil, ErrAttachNotSupported
+	}
+
 	// Validate path only if we need to open databases ourselves
 	if mb.reader == nil && mb.writer == nil && mb.path == "" {
 		return nil, errors.New("database path cannot be empty when not using NewSQL()")
+	}
+
+	// Validate attachments (re-validate to catch deferred errors from builder)
+	for _, att := range mb.attachments {
+		if att.attachSQL == "" {
+			return nil, fmt.Errorf("invalid attachment %q: %s", att.alias, att.path)
+		}
+	}
+
+	// Check for duplicate aliases
+	seen := make(map[string]bool, len(mb.attachments))
+	for _, att := range mb.attachments {
+		if seen[att.alias] {
+			return nil, fmt.Errorf("%w: %q", ErrAttachDuplicateAlias, att.alias)
+		}
+		seen[att.alias] = true
 	}
 
 	// Ensure internalCtx is never nil - required by BatchCollector
@@ -200,6 +264,10 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		mb.events.Subscribe(handler)
 	}
 
+	// Store attachments and SQL flag on manager for runtime access
+	mb.Manager.attachments = mb.attachments
+	mb.Manager.isSQL = mb.isSQL
+
 	// Initialise reader if enabled
 	if mb.options.EnableReader {
 		if mb.readerProfile == nil {
@@ -209,7 +277,7 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 		// Open database if not already provided by user
 		if mb.reader == nil {
 			var err error
-			mb.reader, err = open(mb.path, mb.readerProfile)
+			mb.reader, mb.readerConnector, err = openWithConnector(mb.path, mb.readerProfile, mb.attachments)
 			if err != nil {
 				return nil, err
 			}
@@ -239,7 +307,7 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 
 		// Open database if not already provided by user
 		if mb.writer == nil {
-			mb.writer, err = open(mb.path, mb.writerProfile)
+			mb.writer, mb.writerConnector, err = openWithConnector(mb.path, mb.writerProfile, mb.attachments)
 			if err != nil {
 				if mb.reader != nil {
 					_ = mb.reader.Close()
@@ -306,18 +374,71 @@ func (mb *qwrBuilder) Open() (*Manager, error) {
 	return mb.Manager, nil
 }
 
-// Helper function to open a database with a profile
-func open(path string, profile *profile.Profile) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+// openWithConnector opens a database using a custom connector that handles
+// per-connection PRAGMA application via DSN parameters and ATTACH statements.
+// Returns the *sql.DB and the connector for later runtime attachment updates.
+func openWithConnector(path string, p *profile.Profile, attachments []attachment) (*sql.DB, *connInit, error) {
+	drv, err := sqliteDriver()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	// Apply profile settings
-	if err := profile.Apply(db); err != nil {
-		_ = db.Close()
-		return nil, err
+	dsn := buildDSN(path, p)
+	connector := &connInit{
+		drv:         drv,
+		dsn:         dsn,
+		attachments: attachments,
 	}
 
-	return db, nil
+	db := sql.OpenDB(connector)
+	p.ApplyPool(db)
+
+	// Verify the connection works (this also triggers the first ATTACH)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	return db, connector, nil
+}
+
+// buildDSN constructs a modernc.org/sqlite DSN with _pragma parameters
+// from the profile. This ensures PRAGMAs are applied on every new connection.
+func buildDSN(path string, p *profile.Profile) string {
+	if p == nil || len(p.Pragmas) == 0 {
+		return path
+	}
+
+	params := p.DSNPragmas()
+	if len(params) == 0 {
+		return path
+	}
+
+	// Use file: URI format for the DSN
+	var b strings.Builder
+	if !strings.HasPrefix(path, "file:") {
+		if path == ":memory:" {
+			b.WriteString("file::memory:")
+		} else {
+			b.WriteString("file:")
+			b.WriteString(filepath.ToSlash(path))
+		}
+	} else {
+		b.WriteString(path)
+	}
+
+	b.WriteByte('?')
+	for i, param := range params {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		// The _pragma values use parentheses, not =, so we need to
+		// encode only the value portion after the = sign.
+		parts := strings.SplitN(param, "=", 2)
+		b.WriteString(parts[0])
+		b.WriteByte('=')
+		b.WriteString(url.QueryEscape(parts[1]))
+	}
+
+	return b.String()
 }

@@ -34,6 +34,12 @@ type Manager struct {
 	path           string          // Database path for logging context
 	checkpoint     checkpoint.Mode // WAL checkpoint mode to run on Close()
 
+	// ATTACH support
+	attachments     []attachment // Attached databases for checkpoint on close
+	readerConnector *connInit   // Connector for reader pool (nil for NewSQL)
+	writerConnector *connInit   // Connector for writer pool (nil for NewSQL)
+	isSQL           bool        // true when created via NewSQL
+
 	// Shutdown coordination
 	closed      atomic.Bool    // fast check for retry callbacks and submissions
 	closeOnce   sync.Once      // ensures Close() runs exactly once
@@ -244,12 +250,21 @@ func (m *Manager) doClose() error {
 
 	// Run WAL checkpoint if configured (before closing writer)
 	if m.checkpoint != checkpoint.None && m.writer != nil {
+		// Checkpoint main database
 		m.events.Emit(Event{Type: EventCheckpointStarted, CheckpointMode: string(m.checkpoint)})
 		if _, err := m.writer.Exec(fmt.Sprintf("PRAGMA wal_checkpoint(%s)", m.checkpoint)); err != nil {
 			m.events.Emit(Event{Type: EventCheckpointFailed, CheckpointMode: string(m.checkpoint), Err: err})
 			errs = append(errs, err)
 		} else {
 			m.events.Emit(Event{Type: EventCheckpointCompleted, CheckpointMode: string(m.checkpoint)})
+		}
+
+		// Checkpoint each attached database
+		for _, att := range m.attachments {
+			stmt := fmt.Sprintf("PRAGMA %s.wal_checkpoint(%s)", att.alias, m.checkpoint)
+			if _, err := m.writer.Exec(stmt); err != nil {
+				errs = append(errs, fmt.Errorf("checkpoint %s: %w", att.alias, err))
+			}
 		}
 	}
 
