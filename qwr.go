@@ -36,9 +36,9 @@ type Manager struct {
 
 	// ATTACH support
 	attachments     []attachment // Attached databases for checkpoint on close
-	readerConnector *connInit   // Connector for reader pool (nil for NewSQL)
-	writerConnector *connInit   // Connector for writer pool (nil for NewSQL)
-	isSQL           bool        // true when created via NewSQL
+	readerConnector *connInit    // Connector for reader pool (nil for NewSQL)
+	writerConnector *connInit    // Connector for writer pool (nil for NewSQL)
+	isSQL           bool         // true when created via NewSQL
 
 	// Shutdown coordination
 	closed      atomic.Bool    // fast check for retry callbacks and submissions

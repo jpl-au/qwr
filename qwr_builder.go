@@ -427,7 +427,13 @@ func buildDSN(path string, p *profile.Profile) string {
 		b.WriteString(path)
 	}
 
-	b.WriteByte('?')
+	// Use & if the path already has query parameters, ? otherwise
+	if strings.Contains(path, "?") {
+		b.WriteByte('&')
+	} else {
+		b.WriteByte('?')
+	}
+
 	for i, param := range params {
 		if i > 0 {
 			b.WriteByte('&')

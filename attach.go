@@ -29,12 +29,12 @@ var reservedSchemas = map[string]bool{
 var validAlias = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
-	ErrAttachReservedAlias = errors.New("alias is a reserved SQLite schema name")
-	ErrAttachInvalidAlias  = errors.New("alias must be a valid SQLite identifier (letters, digits, underscores)")
-	ErrAttachEmptyAlias    = errors.New("alias cannot be empty")
-	ErrAttachEmptyPath     = errors.New("path cannot be empty")
+	ErrAttachReservedAlias  = errors.New("alias is a reserved SQLite schema name")
+	ErrAttachInvalidAlias   = errors.New("alias must be a valid SQLite identifier (letters, digits, underscores)")
+	ErrAttachEmptyAlias     = errors.New("alias cannot be empty")
+	ErrAttachEmptyPath      = errors.New("path cannot be empty")
 	ErrAttachDuplicateAlias = errors.New("alias is already attached")
-	ErrAttachNotSupported  = errors.New("Attach is not supported with NewSQL - manage ATTACH statements on your own connections")
+	ErrAttachNotSupported   = errors.New("Attach is not supported with NewSQL - manage ATTACH statements on your own connections")
 )
 
 // newAttachment validates inputs and builds an attachment with precomputed SQL.
