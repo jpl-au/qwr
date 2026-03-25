@@ -414,13 +414,18 @@ func (m *Manager) ResetCaches() {
 	}
 }
 
-// RunVacuum performs a VACUUM operation (full database rebuild)
-func (m *Manager) RunVacuum() error {
+// RunVacuum performs a VACUUM operation on the main database or an
+// attached database if a schema name is provided.
+func (m *Manager) RunVacuum(schema ...string) error {
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
+	stmt := "VACUUM"
+	if len(schema) > 0 && schema[0] != "" {
+		stmt = fmt.Sprintf("VACUUM %s", schema[0])
+	}
 	m.events.Emit(Event{Type: EventVacuumStarted})
-	_, err := m.writer.Exec("VACUUM")
+	_, err := m.writer.Exec(stmt)
 	if err != nil {
 		m.events.Emit(Event{Type: EventVacuumFailed, Err: err})
 	} else {
@@ -429,16 +434,21 @@ func (m *Manager) RunVacuum() error {
 	return err
 }
 
-// RunIncrementalVacuum performs incremental vacuum if enabled
-func (m *Manager) RunIncrementalVacuum(pages int) error {
+// RunIncrementalVacuum performs incremental vacuum on the main database
+// or an attached database if a schema name is provided.
+func (m *Manager) RunIncrementalVacuum(pages int, schema ...string) error {
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
 	if pages < 0 {
 		return fmt.Errorf("invalid pages value: must be non-negative, got %d", pages)
 	}
+	prefix := "PRAGMA"
+	if len(schema) > 0 && schema[0] != "" {
+		prefix = fmt.Sprintf("PRAGMA %s.", schema[0])
+	}
 	m.events.Emit(Event{Type: EventVacuumStarted})
-	_, err := m.writer.Exec("PRAGMA incremental_vacuum(?)", pages)
+	_, err := m.writer.Exec(fmt.Sprintf("%sincremental_vacuum(%d)", prefix, pages))
 	if err != nil {
 		m.events.Emit(Event{Type: EventVacuumFailed, Err: err})
 	} else {
@@ -447,22 +457,126 @@ func (m *Manager) RunIncrementalVacuum(pages int) error {
 	return err
 }
 
-// RunCheckpoint triggers a WAL checkpoint
-func (m *Manager) RunCheckpoint(mode checkpoint.Mode) error {
+// RunCheckpoint triggers a WAL checkpoint on the main database or an
+// attached database if a schema name is provided.
+func (m *Manager) RunCheckpoint(mode checkpoint.Mode, schema ...string) error {
 	if m.writer == nil {
 		return ErrWriterDisabled
 	}
 	if mode == checkpoint.None {
 		return nil
 	}
+	prefix := "PRAGMA"
+	if len(schema) > 0 && schema[0] != "" {
+		prefix = fmt.Sprintf("PRAGMA %s.", schema[0])
+	}
 	m.events.Emit(Event{Type: EventCheckpointStarted, CheckpointMode: string(mode)})
-	_, err := m.writer.Exec(fmt.Sprintf("PRAGMA wal_checkpoint(%s)", mode))
+	_, err := m.writer.Exec(fmt.Sprintf("%swal_checkpoint(%s)", prefix, mode))
 	if err != nil {
 		m.events.Emit(Event{Type: EventCheckpointFailed, CheckpointMode: string(mode), Err: err})
 	} else {
 		m.events.Emit(Event{Type: EventCheckpointCompleted, CheckpointMode: string(mode)})
 	}
 	return err
+}
+
+// Attach attaches a database at runtime. The ATTACH statement runs immediately
+// on the writer connection. The reader connector is updated so new reader
+// connections get the attachment automatically as the pool recycles them.
+// Call ResetReaderPool to force immediate reader access to the attached database.
+//
+// An optional profile configures per-schema PRAGMAs for the attached database.
+// Only PRAGMA settings are used - pool parameters are ignored.
+//
+// Not supported for managers created with NewSQL.
+func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
+	if m.isSQL {
+		return ErrAttachNotSupported
+	}
+
+	var prof *profile.Profile
+	if len(p) > 0 {
+		prof = p[0]
+	}
+
+	att, err := newAttachment(alias, path, m.path, prof)
+	if err != nil {
+		return err
+	}
+
+	// Check for duplicate alias across existing attachments
+	for _, existing := range m.attachments {
+		if existing.alias == alias {
+			return fmt.Errorf("%w: %q", ErrAttachDuplicateAlias, alias)
+		}
+	}
+	if m.readerConnector != nil && m.readerConnector.hasAlias(alias) {
+		return fmt.Errorf("%w: %q", ErrAttachDuplicateAlias, alias)
+	}
+
+	// Run ATTACH on the writer immediately
+	if m.writer != nil {
+		if _, err := m.writer.Exec(att.attachSQL); err != nil {
+			return fmt.Errorf("failed to attach %q on writer: %w", alias, err)
+		}
+		for _, stmt := range att.schemaStatements {
+			if _, err := m.writer.Exec(stmt); err != nil {
+				return fmt.Errorf("failed to apply pragma for %q on writer: %w", alias, err)
+			}
+		}
+	}
+
+	// Update connectors so new connections get the attachment
+	if m.readerConnector != nil {
+		m.readerConnector.addAttachment(att)
+	}
+	if m.writerConnector != nil {
+		m.writerConnector.addAttachment(att)
+	}
+
+	// Store for close-time checkpoint
+	m.attachments = append(m.attachments, att)
+	return nil
+}
+
+// ResetReaderPool closes all existing reader connections and creates a
+// new reader pool using the same connector. New connections will include
+// any attachments added via Manager.Attach since the pool was last created.
+// In-flight read operations on the old pool may fail.
+func (m *Manager) ResetReaderPool() error {
+	if m.reader == nil {
+		return ErrReaderDisabled
+	}
+	if m.readerConnector == nil {
+		return errors.New("reader pool reset requires a qwr-managed connector (not available with NewSQL)")
+	}
+
+	// Close old reader statement cache
+	if m.readStmtCache != nil {
+		m.readStmtCache.Close()
+	}
+
+	// Close old reader pool
+	if err := m.reader.Close(); err != nil {
+		return fmt.Errorf("failed to close reader pool: %w", err)
+	}
+
+	// Open new pool with the same connector (which has updated attachments)
+	m.reader = sql.OpenDB(m.readerConnector)
+	m.readerProfile.ApplyPool(m.reader)
+
+	if err := m.reader.Ping(); err != nil {
+		return fmt.Errorf("failed to verify new reader pool: %w", err)
+	}
+
+	// Create new statement cache
+	cache, err := NewStmtCache(m.events, m.options)
+	if err != nil {
+		return fmt.Errorf("failed to create reader statement cache: %w", err)
+	}
+	m.readStmtCache = cache
+
+	return nil
 }
 
 // SetSecureDelete enables or disables secure_delete
