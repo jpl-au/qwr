@@ -545,17 +545,12 @@ func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
 		return fmt.Errorf("%w: %q", ErrAttachDuplicateAlias, alias)
 	}
 
-	// Run ATTACH on the writer immediately
+	// Run ATTACH + PRAGMAs on the writer using a single raw connection.
+	// This prevents the write worker from interleaving between the ATTACH
+	// and its per-schema PRAGMAs.
 	if m.writer != nil {
-		if _, err := m.writer.Exec(att.attachSQL, att.path); err != nil {
-			return fmt.Errorf("failed to attach %q on writer: %w", alias, err)
-		}
-		for _, stmt := range att.schemaStatements {
-			if _, err := m.writer.Exec(stmt); err != nil {
-				// Rollback the ATTACH to avoid a phantom attachment
-				m.writer.Exec(fmt.Sprintf("DETACH DATABASE %s", alias)) //nolint:errcheck
-				return fmt.Errorf("failed to apply pragma for %q on writer: %w", alias, err)
-			}
+		if err := m.attachOnWriter(att); err != nil {
+			return err
 		}
 	}
 
@@ -569,6 +564,30 @@ func (m *Manager) Attach(alias, path string, p ...*profile.Profile) error {
 
 	// Store for close-time checkpoint
 	m.attachments = append(m.attachments, att)
+	return nil
+}
+
+// attachOnWriter runs ATTACH + per-schema PRAGMAs on a single raw connection,
+// preventing the write worker from interleaving between statements.
+func (m *Manager) attachOnWriter(att attachment) error {
+	conn, err := m.writer.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to acquire writer connection for attach: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(context.Background(), att.attachSQL, att.path); err != nil {
+		return fmt.Errorf("failed to attach %q on writer: %w", att.alias, err)
+	}
+
+	for _, stmt := range att.schemaStatements {
+		if _, err := conn.ExecContext(context.Background(), stmt); err != nil {
+			// Rollback the ATTACH to avoid a phantom attachment
+			conn.ExecContext(context.Background(), fmt.Sprintf("DETACH DATABASE %s", att.alias)) //nolint:errcheck
+			return fmt.Errorf("failed to apply pragma for %q on writer: %w", att.alias, err)
+		}
+	}
+
 	return nil
 }
 
